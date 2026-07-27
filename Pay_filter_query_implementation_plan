@@ -1,0 +1,381 @@
+# PayRoll Query System — Implementation Plan
+
+## Decisions Locked In
+
+| Decision | Choice |
+|----------|--------|
+| Architecture | Option A — Full-Stack Web App |
+| Users | Multi-user (multiple accountants) |
+| PDF Parsing | Full financial detail extraction |
+| Backend | Flask (Python) |
+| Frontend | React (Vite) |
+| Database | PostgreSQL |
+| Deployment | Frontend → Vercel, Backend + DB → Railway |
+| Scope | Phase 1 + Phase 2 + AI Natural Language Search |
+
+---
+
+## System Architecture
+
+```mermaid
+graph TB
+    subgraph Vercel["Vercel (Frontend)"]
+        React["React + Vite"]
+    end
+
+    subgraph Railway["Railway (Backend)"]
+        Flask["Flask API"]
+        Parser["PDF/Excel Parser"]
+        AI["Gemini AI Query"]
+        PG["PostgreSQL"]
+    end
+
+    React -->|REST API| Flask
+    Flask --> Parser
+    Flask --> AI
+    Flask --> PG
+    Parser --> PG
+```
+
+---
+
+## Database Schema
+
+```mermaid
+erDiagram
+    UPLOAD_BATCH ||--o{ PAYSLIP : contains
+    EMPLOYEE ||--o{ PAYSLIP : has
+    PAYSLIP ||--o{ PAYSLIP_EARNING : has
+    PAYSLIP ||--o{ PAYSLIP_DEDUCTION : has
+
+    EMPLOYEE {
+        int id PK
+        int file_no UK
+        int ippis_number UK
+        string name
+        string gl
+        string department
+        string division
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    UPLOAD_BATCH {
+        int id PK
+        string month_year "e.g. 2026-04"
+        string excel_filename
+        string pdf_filename
+        int total_records
+        string status "processing/completed/failed"
+        timestamp uploaded_at
+    }
+
+    PAYSLIP {
+        int id PK
+        int employee_id FK
+        int batch_id FK
+        string month_year
+        string grade
+        int step
+        string gender
+        string tax_state
+        string designation
+        date date_of_birth
+        date date_of_first_appt
+        string trade_union
+        string bank_name
+        string account_number
+        string pfa_name
+        string pension_pin
+        decimal total_gross_earnings
+        decimal total_gross_deductions
+        decimal total_net_earnings
+        decimal cumulative_tax
+        decimal cumulative_income
+        decimal cumulative_pension
+        decimal cumulative_nhf
+    }
+
+    PAYSLIP_EARNING {
+        int id PK
+        int payslip_id FK
+        string earning_type
+        decimal amount
+    }
+
+    PAYSLIP_DEDUCTION {
+        int id PK
+        int payslip_id FK
+        string deduction_type
+        decimal amount
+    }
+```
+
+---
+
+## API Endpoints
+
+### Upload & Parsing
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/upload` | Upload Excel + PDF for a given month |
+| `GET` | `/api/uploads` | List all uploaded batches |
+| `GET` | `/api/uploads/:id/status` | Check processing status of an upload |
+
+### Employees
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/employees` | Search/filter employees. Query params: `name`, `department`, `division`, `file_no`, `ippis_number`, `gl`, `page`, `per_page` |
+| `GET` | `/api/employees/:id` | Employee detail + all payslip history |
+
+### Payslips
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/payslips` | List payslips with filters (employee, month, department, etc.) |
+| `GET` | `/api/payslips/:id` | Full payslip detail (earnings + deductions breakdown) |
+
+### Analytics (Phase 2)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/analytics/department-summary` | Total salary, avg salary, headcount per department |
+| `GET` | `/api/analytics/gl-distribution` | Employee count and salary totals per GL level |
+| `GET` | `/api/analytics/deduction-breakdown` | Most common deductions, totals by category |
+| `GET` | `/api/analytics/salary-trends/:employee_id` | Month-over-month earnings/deductions for an employee |
+| `GET` | `/api/analytics/monthly-overview` | Total payroll expenditure per uploaded month |
+
+### AI Query (Phase 3)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/query/natural-language` | Accept plain English query, return structured results |
+
+### Export
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/export` | Export filtered results as CSV. Same filters as `/api/employees` |
+
+---
+
+## PDF Parsing Strategy
+
+Each PDF page is one payslip. The parser will extract structured data using `pdfplumber`:
+
+```
+Page Text Structure:
+├── Employee Name + Grade
+├── IPPIS Number + Step
+├── Ministry + Gender
+├── Designation + Tax State
+├── Location + TIN
+├── Date of First Appointment
+├── Date of Birth
+├── Trade Union
+├── Bank Info (Bank Name, Account Number)
+├── Pension Info (PFA Name, Pension PIN)
+├── Summary (Gross Earnings, Gross Deductions, Net Earnings)
+├── Cumulative Balances (Tax, Income, Pension, NHF)
+├── Earnings Table (type → amount)
+└── Deductions Table (type → amount)
+```
+
+> [!IMPORTANT]
+> The PDF has **1,481 pages**. Parsing will be done as a **background job** so the upload doesn't time out. The frontend will show a progress indicator while processing.
+
+---
+
+## Project File Structure
+
+```
+PayRollQuery/
+├── backend/
+│   ├── app/
+│   │   ├── __init__.py              # Flask app factory
+│   │   ├── config.py                # Config (DB URL, API keys, etc.)
+│   │   ├── extensions.py            # SQLAlchemy, Migrate, CORS init
+│   │   ├── models/
+│   │   │   ├── __init__.py
+│   │   │   ├── employee.py          # Employee model
+│   │   │   ├── upload_batch.py      # UploadBatch model
+│   │   │   ├── payslip.py           # Payslip model
+│   │   │   ├── payslip_earning.py   # PayslipEarning model
+│   │   │   └── payslip_deduction.py # PayslipDeduction model
+│   │   ├── routes/
+│   │   │   ├── __init__.py
+│   │   │   ├── upload.py            # Upload endpoints
+│   │   │   ├── employees.py         # Employee search/detail
+│   │   │   ├── payslips.py          # Payslip endpoints
+│   │   │   ├── analytics.py         # Analytics endpoints
+│   │   │   ├── ai_query.py          # Natural language query
+│   │   │   └── export.py            # CSV export
+│   │   ├── services/
+│   │   │   ├── __init__.py
+│   │   │   ├── excel_parser.py      # Parse NOMINAL-PAYROLL Excel
+│   │   │   ├── pdf_parser.py        # Parse payslip PDF pages
+│   │   │   ├── analytics_service.py # Aggregation queries
+│   │   │   └── ai_service.py        # Gemini NL → SQL translation
+│   │   └── utils/
+│   │       ├── __init__.py
+│   │       └── helpers.py           # Shared utilities
+│   ├── migrations/                  # Flask-Migrate (Alembic)
+│   ├── requirements.txt
+│   ├── Procfile                     # Railway deployment
+│   └── run.py                       # Entry point
+│
+├── frontend/
+│   ├── public/
+│   ├── src/
+│   │   ├── api/
+│   │   │   └── client.js            # Axios API client
+│   │   ├── components/
+│   │   │   ├── layout/
+│   │   │   │   ├── Sidebar.jsx
+│   │   │   │   ├── Header.jsx
+│   │   │   │   └── Layout.jsx
+│   │   │   ├── employees/
+│   │   │   │   ├── EmployeeTable.jsx
+│   │   │   │   ├── EmployeeCard.jsx
+│   │   │   │   └── FilterPanel.jsx
+│   │   │   ├── payslips/
+│   │   │   │   ├── PayslipDetail.jsx
+│   │   │   │   ├── EarningsTable.jsx
+│   │   │   │   └── DeductionsTable.jsx
+│   │   │   ├── analytics/
+│   │   │   │   ├── DepartmentChart.jsx
+│   │   │   │   ├── GLDistribution.jsx
+│   │   │   │   ├── DeductionBreakdown.jsx
+│   │   │   │   └── SalaryTrendChart.jsx
+│   │   │   ├── upload/
+│   │   │   │   ├── UploadForm.jsx
+│   │   │   │   └── UploadProgress.jsx
+│   │   │   ├── ai/
+│   │   │   │   └── NLQueryBar.jsx
+│   │   │   └── common/
+│   │   │       ├── SearchBar.jsx
+│   │   │       ├── Pagination.jsx
+│   │   │       ├── StatCard.jsx
+│   │   │       └── LoadingSpinner.jsx
+│   │   ├── pages/
+│   │   │   ├── Dashboard.jsx
+│   │   │   ├── Employees.jsx
+│   │   │   ├── EmployeeDetail.jsx
+│   │   │   ├── Upload.jsx
+│   │   │   └── Analytics.jsx
+│   │   ├── styles/
+│   │   │   └── index.css            # Global styles + design system
+│   │   ├── App.jsx
+│   │   └── main.jsx
+│   ├── index.html
+│   ├── vite.config.js
+│   └── package.json
+│
+├── NOMINAL-PAYROLL DESK.xlsx        # Sample data (not deployed)
+└── AJAOKUTA STEEL COMPANY LIMITED_49_202604.pdf
+```
+
+---
+
+## Proposed Changes
+
+### Backend
+
+#### [NEW] `backend/app/__init__.py`
+Flask app factory with CORS, blueprint registration, and error handlers.
+
+#### [NEW] `backend/app/config.py`
+Configuration class loading `DATABASE_URL`, `GEMINI_API_KEY`, `UPLOAD_FOLDER` from environment variables.
+
+#### [NEW] `backend/app/extensions.py`
+SQLAlchemy, Flask-Migrate, and Flask-CORS initialization.
+
+#### [NEW] `backend/app/models/*.py`
+5 SQLAlchemy models matching the database schema above. Employee has a unique constraint on `ippis_number`. Payslip has a composite unique on `(employee_id, month_year)`.
+
+#### [NEW] `backend/app/services/excel_parser.py`
+Reads the uploaded Excel file using `openpyxl`. Creates/updates Employee records. Handles the header row (row 2) and data rows (row 3+).
+
+#### [NEW] `backend/app/services/pdf_parser.py`
+Parses each page of the payslip PDF using `pdfplumber`. Extracts employee info, earnings, deductions, and summary totals. Matches to Employee records via IPPIS number. Runs as a background thread to avoid request timeouts.
+
+#### [NEW] `backend/app/services/ai_service.py`
+Takes a natural language query, sends it to Gemini API with the database schema as context, receives a structured filter object back, and executes it against the database.
+
+#### [NEW] `backend/app/routes/*.py`
+6 route blueprints implementing the 14 API endpoints listed above.
+
+#### [NEW] `backend/requirements.txt`
+```
+flask
+flask-sqlalchemy
+flask-migrate
+flask-cors
+psycopg2-binary
+openpyxl
+pdfplumber
+gunicorn
+google-generativeai
+python-dotenv
+```
+
+#### [NEW] `backend/Procfile`
+```
+web: gunicorn run:app
+```
+
+---
+
+### Frontend
+
+#### [NEW] `frontend/` (Vite + React project)
+Scaffolded with `create-vite`. React 18+ with React Router for navigation.
+
+#### [NEW] `frontend/src/styles/index.css`
+Complete design system: dark mode, glassmorphism cards, gradient accents, smooth transitions. Color palette uses deep navy (#0a0e1a), electric blue (#3b82f6), and emerald (#10b981) accents.
+
+#### [NEW] `frontend/src/pages/Dashboard.jsx`
+Overview page with stat cards (total employees, total payroll, departments), quick search, and recent uploads.
+
+#### [NEW] `frontend/src/pages/Employees.jsx`
+Main search page with filter panel (Name, Dept, Division, File No, IPPIS, GL) + paginated employee table.
+
+#### [NEW] `frontend/src/pages/EmployeeDetail.jsx`
+Full payslip view for a selected employee — earnings/deductions breakdown, month selector, salary trend chart.
+
+#### [NEW] `frontend/src/pages/Upload.jsx`
+Drag-and-drop upload for Excel + PDF files, month/year selector, upload progress indicator.
+
+#### [NEW] `frontend/src/pages/Analytics.jsx`
+Charts dashboard: department salary breakdown (bar chart), GL distribution (donut), deduction categories (horizontal bar), monthly payroll trend (line chart).
+
+#### [NEW] `frontend/src/components/ai/NLQueryBar.jsx`
+Floating search bar with AI icon. Accepts plain English queries like "Show all GL 15 employees in Finance earning above 300k". Sends to `/api/query/natural-language` and displays results.
+
+---
+
+## Verification Plan
+
+### Automated Tests
+```bash
+# Backend
+cd backend && python -m pytest tests/ -v
+
+# Frontend
+cd frontend && npm run build   # Verify production build succeeds
+```
+
+### Manual Verification
+1. Upload the sample Excel + PDF files and verify all 1,443 employees are parsed
+2. Verify PDF parsing extracts correct earnings/deductions for known employees
+3. Test all 6 search/filter fields individually and in combination
+4. Verify analytics charts show correct aggregated data
+5. Test natural language queries return expected results
+6. Test CSV export with active filters
+7. Test on mobile viewport for responsiveness
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> **Authentication**: Do you want a login system for the accountants? (Username/password, or just open access?)
+
+> [!NOTE]
+> **Gemini API Key**: For the natural language search, we'll need a Gemini API key. Do you already have one, or should I design it so it works without AI initially and you add the key later?
