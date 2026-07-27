@@ -6,7 +6,7 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from werkzeug.utils import secure_filename
 
-from ..extensions import db
+from ..extensions import db, get_supabase
 from ..models.upload_batch import UploadBatch
 from ..services.excel_parser import parse_excel
 from ..services.pdf_parser import parse_pdf
@@ -69,6 +69,31 @@ def upload_files():
         pdf_path = os.path.join(upload_dir, pdf_filename)
         pdf_file.save(pdf_path)
         batch.pdf_filename = pdf_filename
+        
+        # Upload to Supabase
+        supabase = get_supabase()
+        if supabase:
+            try:
+                storage_path = f"{month_year}/{pdf_filename}"
+                with open(pdf_path, 'rb') as f:
+                    supabase.storage.from_("payslips").upload(
+                        file=f,
+                        path=storage_path,
+                        file_options={"content-type": "application/pdf"}
+                    )
+            except Exception as e:
+                if "already" in str(e).lower() or "duplicate" in str(e).lower():
+                    try:
+                        with open(pdf_path, 'rb') as f:
+                            supabase.storage.from_("payslips").update(
+                                file=f,
+                                path=storage_path,
+                                file_options={"content-type": "application/pdf"}
+                            )
+                    except Exception as e2:
+                        print(f"Supabase update failed: {e2}")
+                else:
+                    print(f"Supabase upload failed: {e}")
 
     db.session.add(batch)
     db.session.commit()
@@ -114,6 +139,16 @@ def _process_upload(app, batch_id, excel_path, pdf_path, month_year):
             batch.status = "failed"
             batch.error_message = str(e)
             db.session.commit()
+        finally:
+            # Cleanup temporary files if uploaded to Supabase
+            if get_supabase():
+                try:
+                    if pdf_path and os.path.exists(pdf_path):
+                        os.remove(pdf_path)
+                    if excel_path and os.path.exists(excel_path):
+                        os.remove(excel_path)
+                except Exception as e:
+                    print(f"Failed to cleanup temp files: {e}")
 
 
 @upload_bp.route("/uploads", methods=["GET"])

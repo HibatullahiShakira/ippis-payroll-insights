@@ -12,6 +12,9 @@ class Config:
     default_db = f"sqlite:///{os.path.join(base_dir, 'payroll.db')}"
     SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL", default_db)
     
+    SUPABASE_URL = os.environ.get("SUPABASE_URL")
+    SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+    
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
     JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "jwt-secret-change-in-production")

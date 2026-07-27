@@ -8,6 +8,7 @@ import io
 from ..models.payslip import Payslip
 from ..models.employee import Employee
 from ..models.upload_batch import UploadBatch
+from ..extensions import get_supabase
 
 payslips_bp = Blueprint("payslips", __name__)
 
@@ -99,29 +100,45 @@ def get_payslip_pdf(payslip_id):
     if not batch or not batch.pdf_filename:
         return jsonify({"error": "Original PDF file not found."}), 404
 
-    pdf_path = os.path.join(current_app.config["UPLOAD_FOLDER"], batch.month_year, batch.pdf_filename)
-    if not os.path.exists(pdf_path):
-        return jsonify({"error": "PDF file is missing from server."}), 404
-
+    supabase = get_supabase()
+    storage_path = f"{batch.month_year}/{batch.pdf_filename}"
+    
     try:
         import PyPDF2
         
-        reader = PyPDF2.PdfReader(pdf_path)
+        pdf_bytes = io.BytesIO()
+        
+        if supabase:
+            try:
+                res = supabase.storage.from_("payslips").download(storage_path)
+                pdf_bytes.write(res)
+                pdf_bytes.seek(0)
+            except Exception as e:
+                return jsonify({"error": f"Failed to download PDF from cloud: {str(e)}"}), 404
+        else:
+            pdf_path = os.path.join(current_app.config["UPLOAD_FOLDER"], batch.month_year, batch.pdf_filename)
+            if not os.path.exists(pdf_path):
+                return jsonify({"error": "PDF file is missing from server."}), 404
+            with open(pdf_path, 'rb') as f:
+                pdf_bytes.write(f.read())
+            pdf_bytes.seek(0)
+        
+        reader = PyPDF2.PdfReader(pdf_bytes)
         if payslip.pdf_page_num >= len(reader.pages):
             return jsonify({"error": "Page number out of bounds."}), 400
             
         writer = PyPDF2.PdfWriter()
         writer.add_page(reader.pages[payslip.pdf_page_num])
         
-        pdf_bytes = io.BytesIO()
-        writer.write(pdf_bytes)
-        pdf_bytes.seek(0)
+        out_bytes = io.BytesIO()
+        writer.write(out_bytes)
+        out_bytes.seek(0)
         
         safe_name = employee.name.replace(' ', '_') if employee else "Employee"
         filename = f"Payslip_{safe_name}_{payslip.month_year}.pdf"
         
         return send_file(
-            pdf_bytes,
+            out_bytes,
             mimetype="application/pdf",
             as_attachment=True,
             download_name=filename
