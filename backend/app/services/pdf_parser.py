@@ -143,6 +143,9 @@ def parse_pdf(filepath, batch_id, month_year):
                 # Log error but continue processing other pages
                 print(f"Error parsing page {page_num + 1}: {e}")
                 continue
+            finally:
+                # CRITICAL: Flush pdfplumber cache to prevent memory leak and OOM crash
+                page.flush_cache()
 
     # Final commit
     if batch:
