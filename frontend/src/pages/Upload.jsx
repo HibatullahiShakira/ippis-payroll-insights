@@ -19,6 +19,17 @@ export default function Upload() {
     const now = new Date();
     const current = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
     setMonthYear(current);
+    
+    // Check if there is an active upload to resume tracking
+    uploadAPI.list().then(res => {
+      if (res.data && res.data.uploads && res.data.uploads.length > 0) {
+        const latest = res.data.uploads[0];
+        if (latest.status === 'processing') {
+          setCurrentBatchId(latest.id);
+          setUploading(true);
+        }
+      }
+    }).catch(console.error);
   }, []);
 
   // Poll for status if a batch is processing
