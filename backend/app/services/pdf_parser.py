@@ -44,8 +44,13 @@ def parse_pdf(filepath, batch_id, month_year):
     """
     count = 0
 
-    with pdfplumber.open(filepath) as pdf:
-        total_pages = len(pdf.pages)
+    import io
+    import PyPDF2
+
+    with open(filepath, 'rb') as f:
+        reader = PyPDF2.PdfReader(f)
+        total_pages = len(reader.pages)
+        
         batch = UploadBatch.query.get(batch_id)
         if batch:
             batch.total_records = total_pages
@@ -55,9 +60,20 @@ def parse_pdf(filepath, batch_id, month_year):
         employees_by_ippis = {e.ippis_number: e for e in Employee.query.all()}
         payslips_by_emp_id = {p.employee_id: p for p in Payslip.query.filter_by(month_year=month_year).all()}
 
-        for page_num, page in enumerate(pdf.pages):
+        for page_num in range(total_pages):
             try:
-                text = page.extract_text()
+                # Isolate a single page into memory to completely prevent pdfplumber OOM leaks
+                writer = PyPDF2.PdfWriter()
+                writer.add_page(reader.pages[page_num])
+                
+                page_stream = io.BytesIO()
+                writer.write(page_stream)
+                page_stream.seek(0)
+                
+                with pdfplumber.open(page_stream) as single_pdf:
+                    page = single_pdf.pages[0]
+                    text = page.extract_text()
+                    
                 if not text:
                     continue
 
@@ -149,8 +165,10 @@ def parse_pdf(filepath, batch_id, month_year):
                 print(f"Error parsing page {page_num + 1}: {e}")
                 continue
             finally:
-                # CRITICAL: Flush pdfplumber cache to prevent memory leak and OOM crash
-                page.flush_cache()
+                # Force garbage collection every 50 pages to ensure PyPDF2 and pdfplumber objects are freed
+                if count > 0 and count % 50 == 0:
+                    import gc
+                    gc.collect()
 
     # Final commit
     if batch:
