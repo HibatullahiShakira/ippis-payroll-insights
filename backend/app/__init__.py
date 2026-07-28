@@ -37,10 +37,8 @@ def create_app(config_class=Config):
     app.register_blueprint(analytics_bp, url_prefix="/api/analytics")
     app.register_blueprint(export_bp, url_prefix="/api")
 
-    # Create tables on first request (for development)
-    with app.app_context():
-        from . import models  # noqa: F401
-        db.create_all()
+    # Tables are already created, removing db.create_all() to prevent 
+    # Gunicorn pre-fork SSL connection errors.
 
     # Error handlers
     @app.errorhandler(404)
