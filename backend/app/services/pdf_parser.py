@@ -19,7 +19,6 @@ Each page in the PDF is one employee's payslip with this structure:
 """
 
 import re
-import pdfplumber
 from decimal import Decimal, InvalidOperation
 
 from ..extensions import db
@@ -44,12 +43,10 @@ def parse_pdf(filepath, batch_id, month_year):
     """
     count = 0
 
-    import io
-    import PyPDF2
+    import fitz  # PyMuPDF
 
-    with open(filepath, 'rb') as f:
-        reader = PyPDF2.PdfReader(f)
-        total_pages = len(reader.pages)
+    with fitz.open(filepath) as doc:
+        total_pages = doc.page_count
         
         batch = UploadBatch.query.get(batch_id)
         if batch:
@@ -62,18 +59,10 @@ def parse_pdf(filepath, batch_id, month_year):
 
         for page_num in range(total_pages):
             try:
-                # Isolate a single page into memory to completely prevent pdfplumber OOM leaks
-                writer = PyPDF2.PdfWriter()
-                writer.add_page(reader.pages[page_num])
+                page = doc.load_page(page_num)
+                # get_text("text") mimics pdfplumber's reading order output almost perfectly
+                text = page.get_text("text")
                 
-                page_stream = io.BytesIO()
-                writer.write(page_stream)
-                page_stream.seek(0)
-                
-                with pdfplumber.open(page_stream) as single_pdf:
-                    page = single_pdf.pages[0]
-                    text = page.extract_text()
-                    
                 if not text:
                     continue
 
