@@ -1,6 +1,7 @@
 import { useLocation } from 'react-router-dom';
+import { FiMenu } from 'react-icons/fi';
 
-export default function Header() {
+export default function Header({ onMenuClick }) {
   const location = useLocation();
   
   const getPageTitle = () => {
@@ -14,7 +15,12 @@ export default function Header() {
 
   return (
     <header className="header">
-      <div className="header-title">{getPageTitle()}</div>
+      <div className="header-left">
+        <button className="mobile-menu-btn" onClick={onMenuClick}>
+          <FiMenu />
+        </button>
+        <div className="header-title">{getPageTitle()}</div>
+      </div>
       <div className="header-actions">
         <span className="badge badge-emerald">System Online</span>
       </div>

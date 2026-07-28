@@ -171,6 +171,13 @@ a:hover {
 .sidebar-brand {
   padding: 20px 24px;
   border-bottom: 1px solid var(--border-secondary);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.sidebar-brand-text {
+  flex: 1;
 }
 
 .sidebar-brand h1 {
@@ -444,7 +451,7 @@ a:hover {
   background: var(--gradient-card);
   border: 1px solid var(--border-secondary);
   border-radius: var(--radius-lg);
-  overflow: hidden;
+  overflow-x: auto;
   backdrop-filter: blur(12px);
 }
 
@@ -1183,5 +1190,52 @@ tbody tr:last-child td {
 
   .filter-grid {
     grid-template-columns: 1fr;
+  }
+
+  .mobile-menu-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-size: 1.5rem;
+    cursor: pointer;
+    padding: 8px;
+    margin-right: 12px;
+  }
+
+  .header-left {
+    display: flex;
+    align-items: center;
+  }
+
+  .mobile-close-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1.5rem;
+    cursor: pointer;
+    margin-left: auto;
+  }
+
+  .sidebar-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 95;
+    backdrop-filter: blur(4px);
+  }
+}
+
+@media (min-width: 769px) {
+  .mobile-menu-btn, .mobile-close-btn, .sidebar-overlay {
+    display: none;
   }
 }

@@ -4,15 +4,22 @@ import {
   FiUsers, 
   FiUploadCloud, 
   FiPieChart, 
-  FiLogOut 
+  FiLogOut,
+  FiBarChart2,
+  FiX
 } from 'react-icons/fi';
 
-export default function Sidebar({ user, onLogout }) {
+export default function Sidebar({ user, onLogout, isOpen, onClose }) {
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${isOpen ? 'open' : ''}`}>
       <div className="sidebar-brand">
-        <h1>PayRoll Query</h1>
-        <p>Ajaokuta Steel Co.</p>
+        <div className="sidebar-brand-text">
+          <h1>PayRoll Query</h1>
+          <p>Analytics Engine</p>
+        </div>
+        <button className="mobile-close-btn" onClick={onClose}>
+          <FiX />
+        </button>
       </div>
 
       <nav className="sidebar-nav">
