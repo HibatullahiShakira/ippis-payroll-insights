@@ -50,6 +50,11 @@ def parse_pdf(filepath, batch_id, month_year):
         if batch:
             batch.total_records = total_pages
 
+        # PERFORMANCE OPTIMIZATION: Pre-load DB records into memory dictionaries. 
+        # This completely eliminates thousands of slow network queries to the cloud database!
+        employees_by_ippis = {e.ippis_number: e for e in Employee.query.all()}
+        payslips_by_emp_id = {p.employee_id: p for p in Payslip.query.filter_by(month_year=month_year).all()}
+
         for page_num, page in enumerate(pdf.pages):
             try:
                 text = page.extract_text()
@@ -62,9 +67,9 @@ def parse_pdf(filepath, batch_id, month_year):
 
                 payslip_data["pdf_page_num"] = page_num
 
-                # Find the employee by IPPIS number
+                # Find the employee by IPPIS number in memory
                 ippis = payslip_data["ippis_number"]
-                employee = Employee.query.filter_by(ippis_number=ippis).first()
+                employee = employees_by_ippis.get(ippis)
 
                 if not employee:
                     # Create a minimal employee record if not found in Excel
@@ -76,11 +81,10 @@ def parse_pdf(filepath, batch_id, month_year):
                     )
                     db.session.add(employee)
                     db.session.flush()
+                    employees_by_ippis[ippis] = employee
 
-                # Check for existing payslip (avoid duplicates)
-                existing = Payslip.query.filter_by(
-                    employee_id=employee.id, month_year=month_year
-                ).first()
+                # Check for existing payslip in memory
+                existing = payslips_by_emp_id.get(employee.id)
 
                 if existing:
                     # Update existing payslip
@@ -114,6 +118,7 @@ def parse_pdf(filepath, batch_id, month_year):
                     )
                     db.session.add(payslip)
                     db.session.flush()
+                    payslips_by_emp_id[employee.id] = payslip
 
                     # Add earnings
                     for earning in payslip_data.get("earnings", []):
