@@ -38,6 +38,12 @@ export default function Upload() {
           setStatus({ type: 'error', message: `Processing failed: ${batch.error_message}` });
           setCurrentBatchId(null);
           setUploading(false);
+        } else if (batch.status === 'processing') {
+          if (batch.total_records > 0) {
+             setStatus({ type: 'info', message: `Processing in background: ${batch.records_processed} of ${batch.total_records} pages parsed...` });
+          } else {
+             setStatus({ type: 'info', message: 'Analyzing document structure... (This may take a moment for large files)' });
+          }
         }
         // If processing, keep polling
       } catch (err) {
