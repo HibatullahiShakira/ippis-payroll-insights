@@ -94,6 +94,12 @@ def parse_pdf(filepath, batch_id, month_year):
                 if existing:
                     # Update existing payslip
                     _update_payslip(existing, payslip_data)
+                    
+                    # Clear old earnings and deductions to prevent duplicates on re-upload
+                    PayslipEarning.query.filter_by(payslip_id=existing.id).delete()
+                    PayslipDeduction.query.filter_by(payslip_id=existing.id).delete()
+                    
+                    target_payslip = existing
                 else:
                     # Create new payslip
                     payslip = Payslip(
@@ -124,22 +130,23 @@ def parse_pdf(filepath, batch_id, month_year):
                     db.session.add(payslip)
                     db.session.flush()
                     payslips_by_emp_id[employee.id] = payslip
+                    target_payslip = payslip
 
-                    # Add earnings
-                    for earning in payslip_data.get("earnings", []):
-                        db.session.add(PayslipEarning(
-                            payslip_id=payslip.id,
-                            earning_type=earning["type"],
-                            amount=earning["amount"],
-                        ))
+                # Add earnings
+                for earning in payslip_data.get("earnings", []):
+                    db.session.add(PayslipEarning(
+                        payslip_id=target_payslip.id,
+                        earning_type=earning["type"],
+                        amount=earning["amount"],
+                    ))
 
-                    # Add deductions
-                    for deduction in payslip_data.get("deductions", []):
-                        db.session.add(PayslipDeduction(
-                            payslip_id=payslip.id,
-                            deduction_type=deduction["type"],
-                            amount=deduction["amount"],
-                        ))
+                # Add deductions
+                for deduction in payslip_data.get("deductions", []):
+                    db.session.add(PayslipDeduction(
+                        payslip_id=target_payslip.id,
+                        deduction_type=deduction["type"],
+                        amount=deduction["amount"],
+                    ))
 
                 count += 1
 
