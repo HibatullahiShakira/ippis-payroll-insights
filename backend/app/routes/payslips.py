@@ -104,7 +104,7 @@ def get_payslip_pdf(payslip_id):
     storage_path = f"{batch.month_year}/{batch.pdf_filename}"
     
     try:
-        import PyPDF2
+        import fitz  # PyMuPDF
         
         pdf_bytes = io.BytesIO()
         
@@ -123,15 +123,14 @@ def get_payslip_pdf(payslip_id):
                 pdf_bytes.write(f.read())
             pdf_bytes.seek(0)
         
-        reader = PyPDF2.PdfReader(pdf_bytes)
-        if payslip.pdf_page_num >= len(reader.pages):
+        doc = fitz.open(stream=pdf_bytes.read(), filetype="pdf")
+        if payslip.pdf_page_num >= doc.page_count:
             return jsonify({"error": "Page number out of bounds."}), 400
             
-        writer = PyPDF2.PdfWriter()
-        writer.add_page(reader.pages[payslip.pdf_page_num])
+        new_doc = fitz.open()
+        new_doc.insert_pdf(doc, from_page=payslip.pdf_page_num, to_page=payslip.pdf_page_num)
         
-        out_bytes = io.BytesIO()
-        writer.write(out_bytes)
+        out_bytes = io.BytesIO(new_doc.write())
         out_bytes.seek(0)
         
         safe_name = employee.name.replace(' ', '_') if employee else "Employee"
