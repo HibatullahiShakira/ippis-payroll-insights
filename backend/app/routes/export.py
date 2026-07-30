@@ -2,7 +2,7 @@
 
 import io
 import csv
-from flask import Blueprint, request, Response
+from flask import Blueprint, request, Response, jsonify
 from flask_jwt_extended import jwt_required
 from sqlalchemy import or_
 
@@ -216,3 +216,88 @@ def export_bulk_payslips_pdf():
         import traceback
         traceback.print_exc()
         return jsonify({"error": f"Failed to generate bulk PDF: {str(e)}"}), 500
+
+
+@export_bp.route("/export/employee-bulk-payslips", methods=["GET"])
+@jwt_required()
+def export_employee_bulk_payslips_pdf():
+    """Export a single merged PDF of payslips for a specific employee."""
+    employee_id = request.args.get("employee_id")
+    payslip_ids_str = request.args.get("payslip_ids", "")
+
+    if not employee_id:
+        return jsonify({"error": "employee_id is required"}), 400
+
+    query = Payslip.query.filter(Payslip.employee_id == employee_id)
+
+    if payslip_ids_str:
+        payslip_ids = [int(x.strip()) for x in payslip_ids_str.split(",") if x.strip()]
+        if payslip_ids:
+            query = query.filter(Payslip.id.in_(payslip_ids))
+
+    payslips = query.order_by(Payslip.id).all()
+
+    if not payslips:
+        return jsonify({"error": "No payslips found for this employee."}), 404
+
+    from ..models.upload_batch import UploadBatch
+    from ..extensions import get_supabase
+    import fitz  # PyMuPDF
+    from flask import current_app
+    import os
+
+    merged_doc = fitz.open()
+    supabase = get_supabase()
+    batch_cache = {}
+
+    try:
+        for payslip in payslips:
+            if payslip.pdf_page_num is None:
+                continue
+
+            batch_id = payslip.batch_id
+            if batch_id not in batch_cache:
+                batch = UploadBatch.query.get(batch_id)
+                if not batch or not batch.pdf_filename:
+                    continue
+
+                storage_path = f"{batch.month_year}/{batch.pdf_filename}"
+                pdf_bytes = io.BytesIO()
+
+                if supabase:
+                    try:
+                        res = supabase.storage.from_("payslips").download(storage_path)
+                        pdf_bytes.write(res)
+                        pdf_bytes.seek(0)
+                        batch_cache[batch_id] = fitz.open(stream=pdf_bytes.read(), filetype="pdf")
+                    except Exception as e:
+                        current_app.logger.error(f"Failed to download from cloud: {e}")
+                        continue
+                else:
+                    pdf_path = os.path.join(current_app.config["UPLOAD_FOLDER"], batch.month_year, batch.pdf_filename)
+                    if os.path.exists(pdf_path):
+                        with open(pdf_path, 'rb') as f:
+                            pdf_bytes.write(f.read())
+                        pdf_bytes.seek(0)
+                        batch_cache[batch_id] = fitz.open(stream=pdf_bytes.read(), filetype="pdf")
+
+            source_doc = batch_cache.get(batch_id)
+            if source_doc and payslip.pdf_page_num < source_doc.page_count:
+                merged_doc.insert_pdf(source_doc, from_page=payslip.pdf_page_num, to_page=payslip.pdf_page_num)
+
+        if merged_doc.page_count == 0:
+            return jsonify({"error": "Failed to generate any valid pages."}), 404
+
+        out_bytes = io.BytesIO(merged_doc.write())
+        out_bytes.seek(0)
+
+        filename = f"Employee_{employee_id}_Payslips.pdf"
+        return Response(
+            out_bytes,
+            mimetype="application/pdf",
+            headers={"Content-Disposition": f"inline; filename={filename}"},
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to generate employee bulk PDF: {str(e)}"}), 500

@@ -85,6 +85,8 @@ export const exportAPI = {
     api.get('/export/payslips', { params, responseType: 'blob' }),
   bulkPayslipsPDF: (params) =>
     api.get('/export/bulk-payslips', { params, responseType: 'blob' }),
+  employeeBulkPayslipsPDF: (params) =>
+    api.get('/export/employee-bulk-payslips', { params, responseType: 'blob' }),
 };
 
 export default api;

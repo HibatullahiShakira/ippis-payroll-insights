@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FiSearch, FiDownload, FiFilter } from 'react-icons/fi';
+import { FiSearch, FiDownload, FiFilter, FiEye } from 'react-icons/fi';
 import { employeesAPI, payslipsAPI, exportAPI } from '../api/client';
 
 export default function Employees() {
@@ -120,6 +120,21 @@ export default function Employees() {
     }
   };
 
+  const handleViewBulkPdf = async () => {
+    if (!bulkExportMonth) {
+      alert("Please select a month to view payslips for.");
+      return;
+    }
+    try {
+      const res = await exportAPI.bulkPayslipsPDF({ ...filters, month_year: bulkExportMonth });
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }));
+      window.open(url, '_blank');
+    } catch (err) {
+      console.error("Bulk PDF View failed:", err);
+      alert("Failed to view bulk payslips. Ensure there are payslips for the selected month.");
+    }
+  };
+
   return (
     <div>
       <div className="filter-panel">
@@ -138,8 +153,11 @@ export default function Employees() {
               >
                 {dropdowns.months.map(m => <option key={m} value={m}>{m}</option>)}
               </select>
+              <button className="btn btn-sm btn-primary" onClick={handleViewBulkPdf} style={{ marginRight: '4px' }}>
+                <FiEye /> View Bulk PDF
+              </button>
               <button className="btn btn-sm btn-primary" onClick={handleBulkExportPdf}>
-                <FiDownload /> Bulk PDF Payslips
+                <FiDownload /> Download Bulk PDF
               </button>
             </div>
           </div>

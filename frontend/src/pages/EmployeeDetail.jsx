@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { FiArrowLeft, FiUser, FiBriefcase, FiCreditCard, FiFileText } from 'react-icons/fi';
-import { employeesAPI, payslipsAPI } from '../api/client';
+import { employeesAPI, payslipsAPI, exportAPI } from '../api/client';
 
 export default function EmployeeDetail() {
   const { id } = useParams();
@@ -14,6 +14,10 @@ export default function EmployeeDetail() {
   const [loading, setLoading] = useState(true);
   const [payslipLoading, setPayslipLoading] = useState(false);
   const [pdfLoading, setPdfLoading] = useState(false);
+  
+  const [filterYear, setFilterYear] = useState('');
+  const [filterMonth, setFilterMonth] = useState('');
+  const [bulkPdfLoading, setBulkPdfLoading] = useState(false);
 
   useEffect(() => {
     const fetchEmployee = async () => {
@@ -84,6 +88,54 @@ export default function EmployeeDetail() {
     return `₦${amount.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   };
 
+  const availableYears = [...new Set(payslipHistory.map(p => {
+    if (!p.month_year) return '';
+    const parts = p.month_year.split(/[ -]/);
+    return parts.length > 1 ? parts[1] : p.month_year;
+  }))].filter(Boolean).sort();
+
+  const availableMonths = [...new Set(payslipHistory.map(p => {
+    if (!p.month_year) return '';
+    const parts = p.month_year.split(/[ -]/);
+    return parts.length > 1 ? parts[0] : p.month_year;
+  }))].filter(Boolean).sort();
+
+  const filteredPayslips = payslipHistory.filter(p => {
+    if (!p.month_year) return true;
+    if (filterYear && !p.month_year.includes(filterYear)) return false;
+    if (filterMonth && !p.month_year.includes(filterMonth)) return false;
+    return true;
+  });
+
+  const handleEmployeeBulkPdf = async (viewOnly = false) => {
+    if (filteredPayslips.length === 0) {
+      alert("No payslips match the current filters.");
+      return;
+    }
+    setBulkPdfLoading(true);
+    try {
+      const payslipIds = filteredPayslips.map(p => p.id).join(',');
+      const res = await exportAPI.employeeBulkPayslipsPDF({ employee_id: id, payslip_ids: payslipIds });
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }));
+      if (viewOnly) {
+        window.open(url, '_blank');
+      } else {
+        const link = document.createElement('a');
+        link.href = url;
+        const safeName = employee.name.replace(/ /g, '_');
+        link.setAttribute('download', `Payslips_${safeName}.pdf`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
+    } catch (err) {
+      console.error("Employee Bulk PDF failed:", err);
+      alert("Failed to generate bulk PDF for this employee.");
+    } finally {
+      setBulkPdfLoading(false);
+    }
+  };
+
   if (loading) return <div className="loading-spinner"><div className="spinner"></div></div>;
   if (!employee) return <div className="empty-state">Employee not found</div>;
 
@@ -140,17 +192,42 @@ export default function EmployeeDetail() {
           <div style={{ width: '240px', flexShrink: 0 }}>
             <div className="card" style={{ padding: '16px' }}>
               <h3 className="card-title">Payslip History</h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '12px' }}>
-                {payslipHistory.map(p => (
-                  <button 
-                    key={p.id}
-                    className={`btn ${selectedPayslipId === p.id ? 'btn-primary' : 'btn-secondary'}`}
-                    style={{ width: '100%', justifyContent: 'flex-start' }}
-                    onClick={() => setSelectedPayslipId(p.id)}
-                  >
-                    {p.month_year}
-                  </button>
-                ))}
+              
+              <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <select className="form-select form-select-sm" value={filterYear} onChange={e => setFilterYear(e.target.value)}>
+                  <option value="">All Years</option>
+                  {availableYears.map(y => <option key={y} value={y}>{y}</option>)}
+                </select>
+                <select className="form-select form-select-sm" value={filterMonth} onChange={e => setFilterMonth(e.target.value)}>
+                  <option value="">All Months</option>
+                  {availableMonths.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+
+              <div style={{ marginTop: '16px', display: 'flex', flexDirection: 'column', gap: '8px', paddingBottom: '16px', borderBottom: '1px solid var(--border-secondary)' }}>
+                <button className="btn btn-sm btn-primary" onClick={() => handleEmployeeBulkPdf(true)} disabled={bulkPdfLoading}>
+                  {bulkPdfLoading ? 'Loading...' : 'View All Filtered'}
+                </button>
+                <button className="btn btn-sm btn-secondary" onClick={() => handleEmployeeBulkPdf(false)} disabled={bulkPdfLoading}>
+                  {bulkPdfLoading ? 'Loading...' : 'Download All Filtered'}
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '12px', maxHeight: '400px', overflowY: 'auto' }}>
+                {filteredPayslips.length === 0 ? (
+                  <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>No payslips match filters.</div>
+                ) : (
+                  filteredPayslips.map(p => (
+                    <button 
+                      key={p.id}
+                      className={`btn ${selectedPayslipId === p.id ? 'btn-primary' : 'btn-secondary'}`}
+                      style={{ width: '100%', justifyContent: 'flex-start' }}
+                      onClick={() => setSelectedPayslipId(p.id)}
+                    >
+                      {p.month_year}
+                    </button>
+                  ))
+                )}
               </div>
             </div>
           </div>
