@@ -58,4 +58,13 @@ def create_app(config_class=Config):
     def health():
         return jsonify({"status": "healthy"})
 
+    @app.route("/api/init-db-tables")
+    def init_db_tables():
+        """Temporary route to create missing database tables (like EmployeeHistory)"""
+        try:
+            db.create_all()
+            return jsonify({"status": "success", "message": "All missing tables were created successfully!"})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+
     return app
