@@ -8,6 +8,9 @@ from werkzeug.utils import secure_filename
 
 from ..extensions import db, get_supabase
 from ..models.upload_batch import UploadBatch
+from ..models.payslip import Payslip
+from ..models.payslip_earning import PayslipEarning
+from ..models.payslip_deduction import PayslipDeduction
 from ..services.excel_parser import parse_excel
 from ..services.pdf_parser import parse_pdf
 
@@ -165,3 +168,24 @@ def upload_status(batch_id):
     """Check the processing status of an upload batch."""
     batch = UploadBatch.query.get_or_404(batch_id)
     return jsonify({"batch": batch.to_dict()})
+
+
+@upload_bp.route("/uploads/month/<month_year>", methods=["DELETE"])
+@jwt_required()
+def delete_month_data(month_year):
+    """Delete all payslips, earnings, deductions, and batches for a specific month_year."""
+    try:
+        payslips = Payslip.query.filter_by(month_year=month_year).all()
+        payslip_ids = [p.id for p in payslips]
+        
+        if payslip_ids:
+            PayslipEarning.query.filter(PayslipEarning.payslip_id.in_(payslip_ids)).delete(synchronize_session=False)
+            PayslipDeduction.query.filter(PayslipDeduction.payslip_id.in_(payslip_ids)).delete(synchronize_session=False)
+            Payslip.query.filter(Payslip.id.in_(payslip_ids)).delete(synchronize_session=False)
+            
+        UploadBatch.query.filter_by(month_year=month_year).delete(synchronize_session=False)
+        db.session.commit()
+        return jsonify({"message": f"Successfully deleted all data for {month_year}."})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500

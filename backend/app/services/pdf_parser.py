@@ -104,41 +104,69 @@ def parse_pdf(filepath, batch_id, month_year):
                     employee_id_by_ippis[ippis] = employee_id
 
                 # Check for existing payslip in memory
-                if employee_id in payslip_id_by_emp_id:
-                    # Skip already processed payslips to save massive amounts of DB time during resumed uploads
-                    count += 1
-                    continue
-                
-                # Create new payslip
-                payslip = Payslip(
-                    employee_id=employee_id,
-                    batch_id=batch_id,
-                    month_year=month_year,
-                    grade=payslip_data.get("grade"),
-                    step=payslip_data.get("step"),
-                    gender=payslip_data.get("gender"),
-                    tax_state=payslip_data.get("tax_state"),
-                    designation=payslip_data.get("designation"),
-                    date_of_birth=payslip_data.get("date_of_birth"),
-                    date_of_first_appt=payslip_data.get("date_of_first_appt"),
-                    trade_union=payslip_data.get("trade_union"),
-                    bank_name=payslip_data.get("bank_name"),
-                    account_number=payslip_data.get("account_number"),
-                    pfa_name=payslip_data.get("pfa_name"),
-                    pension_pin=payslip_data.get("pension_pin"),
-                    total_gross_earnings=payslip_data.get("total_gross_earnings"),
-                    total_gross_deductions=payslip_data.get("total_gross_deductions"),
-                    total_net_earnings=payslip_data.get("total_net_earnings"),
-                    cumulative_tax=payslip_data.get("cumulative_tax"),
-                    cumulative_income=payslip_data.get("cumulative_income"),
-                    cumulative_pension=payslip_data.get("cumulative_pension"),
-                    cumulative_nhf=payslip_data.get("cumulative_nhf"),
-                    pdf_page_num=page_num,
-                )
-                db.session.add(payslip)
-                db.session.flush()
-                payslip_id_by_emp_id[employee_id] = payslip.id
-                target_payslip = payslip
+                existing_payslip_id = payslip_id_by_emp_id.get(employee_id)
+                if existing_payslip_id:
+                    # Clear out old earnings and deductions so we can insert new ones
+                    db.session.query(PayslipEarning).filter_by(payslip_id=existing_payslip_id).delete(synchronize_session=False)
+                    db.session.query(PayslipDeduction).filter_by(payslip_id=existing_payslip_id).delete(synchronize_session=False)
+                    
+                    # Update existing payslip with new data
+                    payslip = db.session.query(Payslip).get(existing_payslip_id)
+                    payslip.batch_id = batch_id
+                    payslip.grade = payslip_data.get("grade")
+                    payslip.step = payslip_data.get("step")
+                    payslip.gender = payslip_data.get("gender")
+                    payslip.tax_state = payslip_data.get("tax_state")
+                    payslip.designation = payslip_data.get("designation")
+                    payslip.date_of_birth = payslip_data.get("date_of_birth")
+                    payslip.date_of_first_appt = payslip_data.get("date_of_first_appt")
+                    payslip.trade_union = payslip_data.get("trade_union")
+                    payslip.bank_name = payslip_data.get("bank_name")
+                    payslip.account_number = payslip_data.get("account_number")
+                    payslip.pfa_name = payslip_data.get("pfa_name")
+                    payslip.pension_pin = payslip_data.get("pension_pin")
+                    payslip.total_gross_earnings = payslip_data.get("total_gross_earnings")
+                    payslip.total_gross_deductions = payslip_data.get("total_gross_deductions")
+                    payslip.total_net_earnings = payslip_data.get("total_net_earnings")
+                    payslip.cumulative_tax = payslip_data.get("cumulative_tax")
+                    payslip.cumulative_income = payslip_data.get("cumulative_income")
+                    payslip.cumulative_pension = payslip_data.get("cumulative_pension")
+                    payslip.cumulative_nhf = payslip_data.get("cumulative_nhf")
+                    payslip.net_pay = payslip_data.get("net_pay", 0.0)
+                    payslip.pdf_page_num = page_num
+                    target_payslip = payslip
+                else:
+                    # Create new payslip
+                    payslip = Payslip(
+                        employee_id=employee_id,
+                        batch_id=batch_id,
+                        month_year=month_year,
+                        grade=payslip_data.get("grade"),
+                        step=payslip_data.get("step"),
+                        gender=payslip_data.get("gender"),
+                        tax_state=payslip_data.get("tax_state"),
+                        designation=payslip_data.get("designation"),
+                        date_of_birth=payslip_data.get("date_of_birth"),
+                        date_of_first_appt=payslip_data.get("date_of_first_appt"),
+                        trade_union=payslip_data.get("trade_union"),
+                        bank_name=payslip_data.get("bank_name"),
+                        account_number=payslip_data.get("account_number"),
+                        pfa_name=payslip_data.get("pfa_name"),
+                        pension_pin=payslip_data.get("pension_pin"),
+                        total_gross_earnings=payslip_data.get("total_gross_earnings"),
+                        total_gross_deductions=payslip_data.get("total_gross_deductions"),
+                        total_net_earnings=payslip_data.get("total_net_earnings"),
+                        cumulative_tax=payslip_data.get("cumulative_tax"),
+                        cumulative_income=payslip_data.get("cumulative_income"),
+                        cumulative_pension=payslip_data.get("cumulative_pension"),
+                        cumulative_nhf=payslip_data.get("cumulative_nhf"),
+                        net_pay=payslip_data.get("net_pay", 0.0),
+                        pdf_page_num=page_num,
+                    )
+                    db.session.add(payslip)
+                    db.session.flush()
+                    payslip_id_by_emp_id[employee_id] = payslip.id
+                    target_payslip = payslip
 
                 # Add earnings
                 for earning in payslip_data.get("earnings", []):
