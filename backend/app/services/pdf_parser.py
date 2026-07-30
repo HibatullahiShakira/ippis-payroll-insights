@@ -63,15 +63,19 @@ def parse_pdf(filepath, batch_id, month_year):
             print(f"Could not extract month/year from first page: {e}")
 
         # PERFORMANCE OPTIMIZATION: Pre-load DB records into memory dictionaries. 
-        # This completely eliminates thousands of slow network queries to the cloud database!
-        employees_by_ippis = {e.ippis_number: e for e in Employee.query.all()}
-        payslips_by_emp_id = {p.employee_id: p for p in Payslip.query.filter_by(month_year=month_year).all()}
+        # By loading ONLY the IDs and not the full SQLAlchemy objects, we save hundreds of MB of RAM!
+        employees_data = db.session.query(Employee.ippis_number, Employee.id).all()
+        employee_id_by_ippis = {ippis: emp_id for ippis, emp_id in employees_data}
+        
+        payslips_data = db.session.query(Payslip.employee_id, Payslip.id).filter_by(month_year=month_year).all()
+        payslip_id_by_emp_id = {emp_id: p_id for emp_id, p_id in payslips_data}
 
         for page_num in range(total_pages):
             try:
                 page = doc.load_page(page_num)
                 # get_text("text") mimics pdfplumber's reading order output almost perfectly
                 text = page.get_text("text")
+                page = None # Free page object from memory early
                 
                 if not text:
                     continue
@@ -84,9 +88,9 @@ def parse_pdf(filepath, batch_id, month_year):
 
                 # Find the employee by IPPIS number in memory
                 ippis = payslip_data["ippis_number"]
-                employee = employees_by_ippis.get(ippis)
+                employee_id = employee_id_by_ippis.get(ippis)
 
-                if not employee:
+                if not employee_id:
                     # Create a minimal employee record if not found in Excel
                     employee = Employee(
                         ippis_number=ippis,
@@ -96,19 +100,18 @@ def parse_pdf(filepath, batch_id, month_year):
                     )
                     db.session.add(employee)
                     db.session.flush()
-                    employees_by_ippis[ippis] = employee
+                    employee_id = employee.id
+                    employee_id_by_ippis[ippis] = employee_id
 
                 # Check for existing payslip in memory
-                existing = payslips_by_emp_id.get(employee.id)
-
-                if existing:
+                if employee_id in payslip_id_by_emp_id:
                     # Skip already processed payslips to save massive amounts of DB time during resumed uploads
                     count += 1
                     continue
                 
                 # Create new payslip
                 payslip = Payslip(
-                    employee_id=employee.id,
+                    employee_id=employee_id,
                     batch_id=batch_id,
                     month_year=month_year,
                     grade=payslip_data.get("grade"),
@@ -134,7 +137,7 @@ def parse_pdf(filepath, batch_id, month_year):
                 )
                 db.session.add(payslip)
                 db.session.flush()
-                payslips_by_emp_id[employee.id] = payslip
+                payslip_id_by_emp_id[employee_id] = payslip.id
                 target_payslip = payslip
 
                 # Add earnings
