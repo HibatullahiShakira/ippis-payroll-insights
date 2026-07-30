@@ -122,7 +122,7 @@ def _process_upload(app, batch_id, excel_path, pdf_path, month_year):
 
             # Parse Excel first (creates/updates Employee records)
             if excel_path:
-                excel_count = parse_excel(excel_path)
+                excel_count = parse_excel(excel_path, batch_id)
                 total += excel_count
 
             # Parse PDF (creates Payslip records linked to Employees)

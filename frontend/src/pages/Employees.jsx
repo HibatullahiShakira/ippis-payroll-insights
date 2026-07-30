@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { FiSearch, FiDownload, FiFilter } from 'react-icons/fi';
-import { employeesAPI, exportAPI } from '../api/client';
+import { employeesAPI, payslipsAPI, exportAPI } from '../api/client';
 
 export default function Employees() {
   const navigate = useNavigate();
@@ -16,22 +16,28 @@ export default function Employees() {
     gl: ''
   });
   
-  const [dropdowns, setDropdowns] = useState({ departments: [], divisions: [], glLevels: [] });
+  const [dropdowns, setDropdowns] = useState({ departments: [], divisions: [], glLevels: [], months: [] });
+  const [bulkExportMonth, setBulkExportMonth] = useState('');
 
   // Load dropdown data
   useEffect(() => {
     const fetchDropdowns = async () => {
       try {
-        const [deptRes, divRes, glRes] = await Promise.all([
+        const [deptRes, divRes, glRes, monthsRes] = await Promise.all([
           employeesAPI.departments(),
           employeesAPI.divisions(filters.department),
-          employeesAPI.glLevels()
+          employeesAPI.glLevels(),
+          payslipsAPI.months()
         ]);
         setDropdowns({
           departments: deptRes.data.departments,
           divisions: divRes.data.divisions,
-          glLevels: glRes.data.gl_levels
+          glLevels: glRes.data.gl_levels,
+          months: monthsRes.data.months
         });
+        if (monthsRes.data.months.length > 0) {
+          setBulkExportMonth(monthsRes.data.months[0]);
+        }
       } catch (err) {
         console.error("Failed to load dropdowns:", err);
       }
@@ -67,6 +73,18 @@ export default function Employees() {
     setPagination(prev => ({ ...prev, page: 1 }));
   };
 
+  const handleGlMultiChange = (e) => {
+    const options = e.target.options;
+    const selectedValues = [];
+    for (let i = 0; i < options.length; i++) {
+      if (options[i].selected) {
+        selectedValues.push(options[i].value);
+      }
+    }
+    setFilters(prev => ({ ...prev, gl: selectedValues.join(',') }));
+    setPagination(prev => ({ ...prev, page: 1 }));
+  };
+
   const handleExport = async () => {
     try {
       const res = await exportAPI.employeesCSV(filters);
@@ -82,14 +100,49 @@ export default function Employees() {
     }
   };
 
+  const handleBulkExportPdf = async () => {
+    if (!bulkExportMonth) {
+      alert("Please select a month to export payslips for.");
+      return;
+    }
+    try {
+      const res = await exportAPI.bulkPayslipsPDF({ ...filters, month_year: bulkExportMonth });
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `Bulk_Payslips_${bulkExportMonth}.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      console.error("Bulk PDF Export failed:", err);
+      alert("Failed to export bulk payslips. Ensure there are payslips for the selected month.");
+    }
+  };
+
   return (
     <div>
       <div className="filter-panel">
-        <div className="filter-panel-header">
+        <div className="filter-panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
           <h3><FiFilter /> Filters & Search</h3>
-          <button className="btn btn-sm btn-secondary" onClick={handleExport}>
-            <FiDownload /> Export CSV
-          </button>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            <button className="btn btn-sm btn-secondary" onClick={handleExport}>
+              <FiDownload /> Export CSV
+            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', background: 'var(--bg-secondary)', padding: '2px', borderRadius: 'var(--radius-md)' }}>
+              <select 
+                className="form-select" 
+                style={{ padding: '4px 8px', fontSize: '0.85rem', width: 'auto', border: 'none', background: 'transparent' }}
+                value={bulkExportMonth}
+                onChange={(e) => setBulkExportMonth(e.target.value)}
+              >
+                {dropdowns.months.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <button className="btn btn-sm btn-primary" onClick={handleBulkExportPdf}>
+                <FiDownload /> Bulk PDF Payslips
+              </button>
+            </div>
+          </div>
         </div>
         
         <div className="filter-grid">
@@ -124,9 +177,16 @@ export default function Employees() {
           </div>
           
           <div className="form-group">
-            <label className="form-label">Grade Level (GL)</label>
-            <select name="gl" className="form-select" value={filters.gl} onChange={handleFilterChange}>
-              <option value="">All GLs</option>
+            <label className="form-label">Grade Level (GL) - Hold Ctrl to select multiple</label>
+            <select 
+              name="gl" 
+              className="form-select" 
+              multiple 
+              size="3"
+              style={{ minHeight: '80px' }}
+              value={filters.gl ? filters.gl.split(',') : []} 
+              onChange={handleGlMultiChange}
+            >
               {dropdowns.glLevels.map(g => <option key={g} value={g}>{g}</option>)}
             </select>
           </div>

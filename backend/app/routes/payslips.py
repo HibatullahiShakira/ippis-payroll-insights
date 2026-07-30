@@ -42,7 +42,9 @@ def list_payslips():
 
     gl = request.args.get("gl", "").strip()
     if gl:
-        query = query.filter(Employee.gl == gl)
+        gl_list = [g.strip() for g in gl.split(",") if g.strip()]
+        if gl_list:
+            query = query.filter(Employee.gl.in_(gl_list))
 
     # Sorting
     query = query.order_by(Payslip.month_year.desc(), Employee.name.asc())

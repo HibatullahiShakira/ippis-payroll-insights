@@ -3,9 +3,10 @@
 import openpyxl
 from ..extensions import db
 from ..models.employee import Employee
+from ..models.employee_history import EmployeeHistory
 
 
-def parse_excel(filepath):
+def parse_excel(filepath, batch_id=None):
     """
     Parse the nominal payroll Excel file and create/update Employee records.
 
@@ -48,17 +49,37 @@ def parse_excel(filepath):
             continue
 
         gl_str = str(gl).strip() if gl else None
+        department_str = str(department).strip() if department else None
+        division_str = str(division).strip() if division else None
 
         # Upsert: update existing or create new
         employee = Employee.query.filter_by(ippis_number=ippis_number).first()
 
         if employee:
+            # Check if relevant fields changed
+            changed = False
+            if employee.gl != gl_str or employee.department != department_str or employee.division != division_str:
+                changed = True
+                
+                # Record history
+                history = EmployeeHistory(
+                    employee_id=employee.id,
+                    batch_id=batch_id,
+                    old_gl=employee.gl,
+                    old_department=employee.department,
+                    old_division=employee.division,
+                    new_gl=gl_str,
+                    new_department=department_str,
+                    new_division=division_str
+                )
+                db.session.add(history)
+
             # Update existing record
             employee.name = str(name).strip()
             employee.file_no = file_no
             employee.gl = gl_str
-            employee.department = str(department).strip() if department else None
-            employee.division = str(division).strip() if division else None
+            employee.department = department_str
+            employee.division = division_str
             if serial_no:
                 employee.serial_no = int(serial_no)
         else:

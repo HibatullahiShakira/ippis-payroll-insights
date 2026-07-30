@@ -7,6 +7,8 @@ export default function EmployeeDetail() {
   const { id } = useParams();
   const [employee, setEmployee] = useState(null);
   const [payslipHistory, setPayslipHistory] = useState([]);
+  const [jobHistory, setJobHistory] = useState([]);
+  const [activeTab, setActiveTab] = useState('payslips');
   const [selectedPayslipId, setSelectedPayslipId] = useState(null);
   const [fullPayslip, setFullPayslip] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -16,9 +18,13 @@ export default function EmployeeDetail() {
   useEffect(() => {
     const fetchEmployee = async () => {
       try {
-        const res = await employeesAPI.get(id);
+        const [res, historyRes] = await Promise.all([
+          employeesAPI.get(id),
+          employeesAPI.history(id)
+        ]);
         setEmployee(res.data.employee);
         setPayslipHistory(res.data.payslips);
+        setJobHistory(historyRes.data.history);
         
         if (res.data.payslips.length > 0) {
           setSelectedPayslipId(res.data.payslips[0].id);
@@ -105,14 +111,31 @@ export default function EmployeeDetail() {
         </div>
       </div>
 
-      {payslipHistory.length === 0 ? (
+      {payslipHistory.length === 0 && jobHistory.length === 0 ? (
         <div className="card empty-state">
           <FiFileText className="empty-state-icon" />
-          <h3>No Payslips Found</h3>
-          <p>This employee has no payslip records in the system.</p>
+          <h3>No Records Found</h3>
+          <p>This employee has no payslip or job history records in the system.</p>
         </div>
       ) : (
-        <div style={{ display: 'flex', gap: '24px' }}>
+        <>
+          <div style={{ display: 'flex', gap: '16px', marginBottom: '24px', borderBottom: '1px solid var(--border-secondary)', paddingBottom: '8px' }}>
+            <button 
+              className={`btn ${activeTab === 'payslips' ? 'btn-primary' : 'btn-ghost'}`} 
+              onClick={() => setActiveTab('payslips')}
+            >
+              Payslips
+            </button>
+            <button 
+              className={`btn ${activeTab === 'history' ? 'btn-primary' : 'btn-ghost'}`} 
+              onClick={() => setActiveTab('history')}
+            >
+              Job History
+            </button>
+          </div>
+
+          {activeTab === 'payslips' && (
+            <div style={{ display: 'flex', gap: '24px' }}>
           {/* Sidebar: Month Selector */}
           <div style={{ width: '240px', flexShrink: 0 }}>
             <div className="card" style={{ padding: '16px' }}>
@@ -227,6 +250,60 @@ export default function EmployeeDetail() {
             )}
           </div>
         </div>
+          )}
+
+          {activeTab === 'history' && (
+            <div className="card">
+              <h3 className="card-title" style={{ marginBottom: '20px' }}>Promotion & Transfer History</h3>
+              {jobHistory.length === 0 ? (
+                <p style={{ color: 'var(--text-muted)' }}>No historical changes recorded for this employee.</p>
+              ) : (
+                <table style={{ background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)', width: '100%' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: 'left', padding: '12px' }}>Date</th>
+                      <th style={{ textAlign: 'left', padding: '12px' }}>Change Type</th>
+                      <th style={{ textAlign: 'left', padding: '12px' }}>Previous</th>
+                      <th style={{ textAlign: 'left', padding: '12px' }}>New</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {jobHistory.map(item => {
+                      const dateObj = new Date(item.change_date);
+                      const isPromotion = item.old_gl !== item.new_gl;
+                      const isTransfer = item.old_department !== item.new_department || item.old_division !== item.new_division;
+                      let changeType = "Update";
+                      if (isPromotion && isTransfer) changeType = "Promotion & Transfer";
+                      else if (isPromotion) changeType = "Promotion";
+                      else if (isTransfer) changeType = "Transfer";
+
+                      return (
+                        <tr key={item.id} style={{ borderBottom: '1px solid var(--border-secondary)' }}>
+                          <td style={{ padding: '12px' }}>{dateObj.toLocaleDateString()}</td>
+                          <td style={{ padding: '12px' }}>
+                            <span className={`badge ${isPromotion ? 'badge-blue' : 'badge-emerald'}`}>
+                              {changeType}
+                            </span>
+                          </td>
+                          <td style={{ padding: '12px', fontSize: '0.85rem' }}>
+                            {item.old_gl && <div>GL: {item.old_gl}</div>}
+                            {item.old_department && <div>Dept: {item.old_department}</div>}
+                            {item.old_division && <div>Div: {item.old_division}</div>}
+                          </td>
+                          <td style={{ padding: '12px', fontSize: '0.85rem', fontWeight: 500 }}>
+                            {item.new_gl && <div>GL: {item.new_gl}</div>}
+                            {item.new_department && <div>Dept: {item.new_department}</div>}
+                            {item.new_division && <div>Div: {item.new_division}</div>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

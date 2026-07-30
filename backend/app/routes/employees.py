@@ -72,7 +72,9 @@ def list_employees():
 
     gl = request.args.get("gl", "").strip()
     if gl:
-        query = query.filter(Employee.gl == gl)
+        gl_list = [g.strip() for g in gl.split(",") if g.strip()]
+        if gl_list:
+            query = query.filter(Employee.gl.in_(gl_list))
 
     # Sorting
     sort_by = request.args.get("sort_by", "name")
@@ -119,6 +121,26 @@ def get_employee(employee_id):
     return jsonify({
         "employee": employee.to_dict(),
         "payslips": [p.to_summary_dict() for p in payslips],
+    })
+
+
+@employees_bp.route("/employees/<int:employee_id>/history", methods=["GET"])
+@jwt_required()
+def get_employee_history(employee_id):
+    """Get employee promotion and transfer history."""
+    from ..models.employee_history import EmployeeHistory
+    
+    employee = Employee.query.get_or_404(employee_id)
+    history = (
+        EmployeeHistory.query
+        .filter_by(employee_id=employee_id)
+        .order_by(EmployeeHistory.change_date.desc())
+        .all()
+    )
+
+    return jsonify({
+        "employee_id": employee.id,
+        "history": [h.to_dict() for h in history]
     })
 
 

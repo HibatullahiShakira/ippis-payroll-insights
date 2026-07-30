@@ -43,6 +43,7 @@ export const authAPI = {
 export const employeesAPI = {
   list: (params) => api.get('/employees', { params }),
   get: (id) => api.get(`/employees/${id}`),
+  history: (id) => api.get(`/employees/${id}/history`),
   departments: () => api.get('/employees/departments'),
   divisions: (department) => api.get('/employees/divisions', { params: { department } }),
   glLevels: () => api.get('/employees/gl-levels'),
@@ -82,6 +83,8 @@ export const exportAPI = {
     api.get('/export/employees', { params, responseType: 'blob' }),
   payslipsCSV: (params) =>
     api.get('/export/payslips', { params, responseType: 'blob' }),
+  bulkPayslipsPDF: (params) =>
+    api.get('/export/bulk-payslips', { params, responseType: 'blob' }),
 };
 
 export default api;
