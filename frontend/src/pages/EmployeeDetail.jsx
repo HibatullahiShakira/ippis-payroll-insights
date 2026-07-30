@@ -22,16 +22,20 @@ export default function EmployeeDetail() {
   useEffect(() => {
     const fetchEmployee = async () => {
       try {
-        const [res, historyRes] = await Promise.all([
-          employeesAPI.get(id),
-          employeesAPI.history(id)
-        ]);
+        const res = await employeesAPI.get(id);
         setEmployee(res.data.employee);
         setPayslipHistory(res.data.payslips);
-        setJobHistory(historyRes.data.history);
         
         if (res.data.payslips.length > 0) {
           setSelectedPayslipId(res.data.payslips[0].id);
+        }
+
+        try {
+          const historyRes = await employeesAPI.history(id);
+          setJobHistory(historyRes.data.history);
+        } catch (hErr) {
+          console.error("Failed to load job history, maybe table doesn't exist yet:", hErr);
+          setJobHistory([]);
         }
       } catch (err) {
         console.error("Failed to load employee:", err);
