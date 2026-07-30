@@ -92,22 +92,48 @@ export default function EmployeeDetail() {
     return `₦${amount.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   };
 
+  const formatMonthYear = (myStr) => {
+    if (!myStr) return '';
+    const parts = myStr.split('-');
+    if (parts.length === 2) {
+      const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+      const monthIndex = parseInt(parts[1], 10) - 1;
+      if (monthIndex >= 0 && monthIndex < 12) {
+        return `${monthNames[monthIndex]} ${parts[0]}`;
+      }
+    }
+    return myStr;
+  };
+
   const availableYears = [...new Set(payslipHistory.map(p => {
     if (!p.month_year) return '';
-    const parts = p.month_year.split(/[ -]/);
-    return parts.length > 1 ? parts[1] : p.month_year;
-  }))].filter(Boolean).sort();
+    const parts = p.month_year.split('-');
+    return parts[0];
+  }))].filter(Boolean).sort((a, b) => b.localeCompare(a)); // sort descending
 
-  const availableMonths = [...new Set(payslipHistory.map(p => {
-    if (!p.month_year) return '';
-    const parts = p.month_year.split(/[ -]/);
-    return parts.length > 1 ? parts[0] : p.month_year;
-  }))].filter(Boolean).sort();
+  const allMonths = [
+    { value: '01', label: 'January' },
+    { value: '02', label: 'February' },
+    { value: '03', label: 'March' },
+    { value: '04', label: 'April' },
+    { value: '05', label: 'May' },
+    { value: '06', label: 'June' },
+    { value: '07', label: 'July' },
+    { value: '08', label: 'August' },
+    { value: '09', label: 'September' },
+    { value: '10', label: 'October' },
+    { value: '11', label: 'November' },
+    { value: '12', label: 'December' }
+  ];
 
   const filteredPayslips = payslipHistory.filter(p => {
     if (!p.month_year) return true;
-    if (filterYear && !p.month_year.includes(filterYear)) return false;
-    if (filterMonth && !p.month_year.includes(filterMonth)) return false;
+    const parts = p.month_year.split('-');
+    const pYear = parts[0];
+    const pMonth = parts.length > 1 ? parts[1] : null;
+
+    if (filterYear && pYear !== filterYear) return false;
+    if (filterMonth && pMonth !== filterMonth) return false;
     return true;
   });
 
@@ -204,7 +230,7 @@ export default function EmployeeDetail() {
                 </select>
                 <select className="form-select form-select-sm" value={filterMonth} onChange={e => setFilterMonth(e.target.value)}>
                   <option value="">All Months</option>
-                  {availableMonths.map(m => <option key={m} value={m}>{m}</option>)}
+                  {allMonths.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                 </select>
               </div>
 
@@ -228,7 +254,7 @@ export default function EmployeeDetail() {
                       style={{ width: '100%', justifyContent: 'flex-start' }}
                       onClick={() => setSelectedPayslipId(p.id)}
                     >
-                      {p.month_year}
+                      {formatMonthYear(p.month_year)}
                     </button>
                   ))
                 )}
@@ -246,7 +272,7 @@ export default function EmployeeDetail() {
               <div className="card">
                 <div className="card-header" style={{ borderBottom: '1px solid var(--border-secondary)', paddingBottom: '16px', marginBottom: '20px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-                    <h2>Payslip for {fullPayslip.month_year}</h2>
+                    <h2>Payslip for {formatMonthYear(fullPayslip.month_year)}</h2>
                     <div style={{ display: 'flex', gap: '8px' }}>
                       <button className="btn btn-secondary btn-sm" onClick={() => handleDownloadPdf(true)} disabled={pdfLoading}>
                         {pdfLoading ? 'Loading...' : 'View PDF'}

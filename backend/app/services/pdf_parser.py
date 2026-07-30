@@ -52,6 +52,16 @@ def parse_pdf(filepath, batch_id, month_year):
         if batch:
             batch.total_records = total_pages
 
+        # Peek at the first page to extract the actual month/year from the PDF text
+        try:
+            if total_pages > 0:
+                first_page_text = doc.load_page(0).get_text("text")
+                first_page_data = _parse_page_text(first_page_text)
+                if first_page_data and first_page_data.get("extracted_month_year"):
+                    month_year = first_page_data["extracted_month_year"]
+        except Exception as e:
+            print(f"Could not extract month/year from first page: {e}")
+
         # PERFORMANCE OPTIMIZATION: Pre-load DB records into memory dictionaries. 
         # This completely eliminates thousands of slow network queries to the cloud database!
         employees_by_ippis = {e.ippis_number: e for e in Employee.query.all()}
@@ -196,6 +206,18 @@ def _parse_page_text(text):
 
     lines = text.split("\n")
     full_text = text
+
+    # --- Extract Month and Year ---
+    month_match = re.search(r"(January|February|March|April|May|June|July|August|September|October|November|December)[\s,]+(\d{4})", full_text, re.IGNORECASE)
+    if month_match:
+        month_str = month_match.group(1).capitalize()
+        year_str = month_match.group(2)
+        month_map = {
+            "January": "01", "February": "02", "March": "03", "April": "04",
+            "May": "05", "June": "06", "July": "07", "August": "08",
+            "September": "09", "October": "10", "November": "11", "December": "12"
+        }
+        data["extracted_month_year"] = f"{year_str}-{month_map[month_str]}"
 
     # --- Extract IPPIS Number ---
     ippis_match = re.search(r"IPPIS\s*Number[:\s]*(\d+)", full_text, re.IGNORECASE)

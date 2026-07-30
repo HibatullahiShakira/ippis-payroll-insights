@@ -151,7 +151,21 @@ export default function Employees() {
                 value={bulkExportMonth}
                 onChange={(e) => setBulkExportMonth(e.target.value)}
               >
-                {dropdowns.months.map(m => <option key={m} value={m}>{m}</option>)}
+                {dropdowns.months.map(m => {
+                  const formatMonthYear = (myStr) => {
+                    if (!myStr) return '';
+                    const parts = myStr.split('-');
+                    if (parts.length === 2) {
+                      const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+                      const monthIndex = parseInt(parts[1], 10) - 1;
+                      if (monthIndex >= 0 && monthIndex < 12) {
+                        return `${monthNames[monthIndex]} ${parts[0]}`;
+                      }
+                    }
+                    return myStr;
+                  };
+                  return <option key={m} value={m}>{formatMonthYear(m)}</option>;
+                })}
               </select>
               <button className="btn btn-sm btn-primary" onClick={handleViewBulkPdf} style={{ marginRight: '4px' }}>
                 <FiEye /> View Bulk PDF
