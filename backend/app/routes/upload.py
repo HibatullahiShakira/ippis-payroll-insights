@@ -139,6 +139,8 @@ def _process_upload(app, batch_id, excel_path, pdf_path, month_year):
             db.session.commit()
 
         except Exception as e:
+            db.session.rollback()
+            batch = UploadBatch.query.get(batch_id)
             batch.status = "failed"
             batch.error_message = str(e)
             db.session.commit()
