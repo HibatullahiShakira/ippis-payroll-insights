@@ -28,14 +28,14 @@ def parse_excel(filepath, batch_id=None):
     count = 0
     # Data starts at row 3 (row 1 = company name, row 2 = headers)
     for row in ws.iter_rows(min_row=3, max_row=ws.max_row):
-        # Extract cell values
-        serial_no = row[0].value
-        file_no = row[1].value
-        ippis_number = row[2].value
-        name = row[3].value
-        gl = row[4].value
-        department = row[5].value
-        division = row[6].value
+        # Extract cell values safely
+        serial_no = row[0].value if len(row) > 0 else None
+        file_no = row[1].value if len(row) > 1 else None
+        ippis_number = row[2].value if len(row) > 2 else None
+        name = row[3].value if len(row) > 3 else None
+        gl = row[4].value if len(row) > 4 else None
+        department = row[5].value if len(row) > 5 else None
+        division = row[6].value if len(row) > 6 else None
 
         # Skip empty rows
         if not ippis_number or not name:
