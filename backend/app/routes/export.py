@@ -2,7 +2,7 @@
 
 import io
 import csv
-from flask import Blueprint, request, Response, jsonify
+from flask import Blueprint, request, Response, jsonify, send_file
 from flask_jwt_extended import jwt_required
 from sqlalchemy import or_
 
@@ -220,10 +220,11 @@ def export_bulk_payslips_pdf():
         out_bytes.seek(0)
 
         filename = f"Bulk_Payslips_{month_year}.pdf"
-        return Response(
+        return send_file(
             out_bytes,
             mimetype="application/pdf",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
+            as_attachment=True,
+            download_name=filename
         )
     except Exception as e:
         import traceback
@@ -279,10 +280,23 @@ def export_employee_bulk_payslips_pdf():
 
                 if supabase:
                     try:
-                        res = supabase.storage.from_("payslips").download(storage_path)
-                        pdf_bytes.write(res)
-                        pdf_bytes.seek(0)
-                        batch_cache[batch_id] = fitz.open(stream=pdf_bytes.read(), filetype="pdf")
+                        # Use urllib.request directly to avoid supabase-py httpx 5s timeout
+                        import urllib.request
+                        import tempfile
+                        url = current_app.config.get("SUPABASE_URL")
+                        key = current_app.config.get("SUPABASE_KEY")
+                        download_url = f"{url}/storage/v1/object/authenticated/payslips/{storage_path}"
+                        req = urllib.request.Request(download_url, headers={"Authorization": f"Bearer {key}", "apikey": key})
+                        
+                        fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+                        with urllib.request.urlopen(req, timeout=120) as dl_res, os.fdopen(fd, 'wb') as f:
+                            while True:
+                                chunk = dl_res.read(8192)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                                
+                        batch_cache[batch_id] = fitz.open(tmp_path)
                     except Exception as e:
                         current_app.logger.error(f"Failed to download from cloud: {e}")
                         continue
@@ -305,10 +319,11 @@ def export_employee_bulk_payslips_pdf():
         out_bytes.seek(0)
 
         filename = f"Employee_{employee_id}_Payslips.pdf"
-        return Response(
+        return send_file(
             out_bytes,
             mimetype="application/pdf",
-            headers={"Content-Disposition": f"inline; filename={filename}"},
+            as_attachment=False,
+            download_name=filename
         )
     except Exception as e:
         import traceback
