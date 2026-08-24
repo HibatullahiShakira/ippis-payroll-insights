@@ -1,5 +1,5 @@
 """
-PDF parser service — extracts full payslip data from the bulk payslip PDF.
+PDF parser service â€” extracts full payslip data from the bulk payslip PDF.
 
 Each page in the PDF is one employee's payslip with this structure:
     - Employee Name, Grade
@@ -14,8 +14,8 @@ Each page in the PDF is one employee's payslip with this structure:
     - Pension Information (PFA Name, Pension PIN)
     - Summary of Payments (Gross Earnings, Gross Deductions, Net Earnings)
     - Cumulative Balances (Tax, Income, Pension, NHF)
-    - Earnings breakdown table (type → amount)
-    - Deductions breakdown table (type → amount)
+    - Earnings breakdown table (type â†’ amount)
+    - Deductions breakdown table (type â†’ amount)
 """
 
 import re
@@ -94,18 +94,34 @@ def parse_pdf(filepath, batch_id, month_year):
                 ippis = payslip_data["ippis_number"]
                 employee_id = employee_id_by_ippis.get(ippis)
 
+                # Extract numeric grade level from payslip (e.g. "GL13_CONPSS" -> "13")
+                raw_grade = payslip_data.get("grade")
+                extracted_gl = None
+                if raw_grade:
+                    m = re.search(r'\d+', raw_grade)
+                    if m:
+                        extracted_gl = m.group(0).zfill(2)
+                    else:
+                        extracted_gl = raw_grade[:10]
+
                 if not employee_id:
                     # Create a minimal employee record if not found in Excel
                     employee = Employee(
                         ippis_number=ippis,
                         name=payslip_data.get("name", "Unknown"),
                         file_no=0,
-                        gl=None,
+                        gl=extracted_gl,
                     )
                     db.session.add(employee)
                     db.session.flush()
                     employee_id = employee.id
                     employee_id_by_ippis[ippis] = employee_id
+                else:
+                    # Update existing employee's GL from the latest payslip
+                    if extracted_gl:
+                        emp_obj = db.session.query(Employee).get(employee_id)
+                        if emp_obj:
+                            emp_obj.gl = extracted_gl
 
                 # Check for existing payslip in memory
                 existing_payslip_id = payslip_id_by_emp_id.get(employee_id)
