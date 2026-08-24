@@ -72,31 +72,7 @@ def upload_files():
         pdf_path = os.path.join(upload_dir, pdf_filename)
         pdf_file.save(pdf_path)
         batch.pdf_filename = pdf_filename
-        
-        # Upload to Supabase
-        supabase = get_supabase()
-        if supabase:
-            try:
-                storage_path = f"{month_year}/{pdf_filename}"
-                with open(pdf_path, 'rb') as f:
-                    supabase.storage.from_("payslips").upload(
-                        file=f,
-                        path=storage_path,
-                        file_options={"content-type": "application/pdf"}
-                    )
-            except Exception as e:
-                if "already" in str(e).lower() or "duplicate" in str(e).lower():
-                    try:
-                        with open(pdf_path, 'rb') as f:
-                            supabase.storage.from_("payslips").update(
-                                file=f,
-                                path=storage_path,
-                                file_options={"content-type": "application/pdf"}
-                            )
-                    except Exception as e2:
-                        print(f"Supabase update failed: {e2}")
-                else:
-                    print(f"Supabase upload failed: {e}")
+
 
     db.session.add(batch)
     db.session.commit()
@@ -120,6 +96,34 @@ def _process_upload(app, batch_id, excel_path, pdf_path, month_year):
     """Background task to parse uploaded files."""
     with app.app_context():
         batch = UploadBatch.query.get(batch_id)
+        
+        # Upload PDF to Supabase in background to prevent HTTP timeouts
+        if pdf_path and os.path.exists(pdf_path):
+            supabase = get_supabase()
+            if supabase:
+                try:
+                    pdf_filename = os.path.basename(pdf_path)
+                    storage_path = f"{month_year}/{pdf_filename}"
+                    with open(pdf_path, 'rb') as f:
+                        supabase.storage.from_("payslips").upload(
+                            file=f,
+                            path=storage_path,
+                            file_options={"content-type": "application/pdf"}
+                        )
+                except Exception as e:
+                    if "already" in str(e).lower() or "duplicate" in str(e).lower():
+                        try:
+                            with open(pdf_path, 'rb') as f:
+                                supabase.storage.from_("payslips").update(
+                                    file=f,
+                                    path=storage_path,
+                                    file_options={"content-type": "application/pdf"}
+                                )
+                        except Exception as e2:
+                            print(f"Supabase update failed: {e2}")
+                    else:
+                        print(f"Supabase upload failed: {e}")
+
         try:
             total = 0
 
