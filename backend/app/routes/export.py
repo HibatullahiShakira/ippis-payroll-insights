@@ -181,21 +181,20 @@ def export_bulk_payslips_pdf():
 
                 if supabase:
                     try:
-                        # Use requests directly to avoid supabase-py httpx 5s timeout
-                        import requests
+                        # Use urllib.request directly to avoid supabase-py httpx 5s timeout and missing requests dependency
+                        import urllib.request
                         import tempfile
                         url = current_app.config.get("SUPABASE_URL")
                         key = current_app.config.get("SUPABASE_KEY")
                         download_url = f"{url}/storage/v1/object/authenticated/payslips/{storage_path}"
-                        headers = {"Authorization": f"Bearer {key}", "apikey": key}
+                        req = urllib.request.Request(download_url, headers={"Authorization": f"Bearer {key}", "apikey": key})
                         
-                        dl_res = requests.get(download_url, headers=headers, stream=True, timeout=120)
-                        dl_res.raise_for_status()
-                        
-                        # Save to a temporary file to save memory (memory-mapped by fitz)
                         fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
-                        with os.fdopen(fd, 'wb') as f:
-                            for chunk in dl_res.iter_content(chunk_size=8192):
+                        with urllib.request.urlopen(req, timeout=120) as dl_res, os.fdopen(fd, 'wb') as f:
+                            while True:
+                                chunk = dl_res.read(8192)
+                                if not chunk:
+                                    break
                                 f.write(chunk)
                                 
                         batch_cache[batch_id] = fitz.open(tmp_path)
