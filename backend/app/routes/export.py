@@ -181,10 +181,24 @@ def export_bulk_payslips_pdf():
 
                 if supabase:
                     try:
-                        res = supabase.storage.from_("payslips").download(storage_path)
-                        pdf_bytes.write(res)
-                        pdf_bytes.seek(0)
-                        batch_cache[batch_id] = fitz.open(stream=pdf_bytes.read(), filetype="pdf")
+                        # Use requests directly to avoid supabase-py httpx 5s timeout
+                        import requests
+                        import tempfile
+                        url = current_app.config.get("SUPABASE_URL")
+                        key = current_app.config.get("SUPABASE_KEY")
+                        download_url = f"{url}/storage/v1/object/authenticated/payslips/{storage_path}"
+                        headers = {"Authorization": f"Bearer {key}", "apikey": key}
+                        
+                        dl_res = requests.get(download_url, headers=headers, stream=True, timeout=120)
+                        dl_res.raise_for_status()
+                        
+                        # Save to a temporary file to save memory (memory-mapped by fitz)
+                        fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+                        with os.fdopen(fd, 'wb') as f:
+                            for chunk in dl_res.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                                
+                        batch_cache[batch_id] = fitz.open(tmp_path)
                     except Exception as e:
                         current_app.logger.error(f"Failed to download from cloud: {e}")
                         continue
