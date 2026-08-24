@@ -156,7 +156,8 @@ def export_bulk_payslips_pdf():
     from ..models.upload_batch import UploadBatch
     from flask import current_app
     import os
-    import fitz  # PyMuPDF
+    import urllib.parse
+    from PyPDF2 import PdfReader, PdfWriter
 
     supabase_url = current_app.config.get("SUPABASE_URL")
     supabase_key = current_app.config.get("SUPABASE_KEY")
@@ -165,7 +166,7 @@ def export_bulk_payslips_pdf():
     batch_cache = {}
 
     try:
-        merged_doc = fitz.open()
+        writer = PdfWriter()
         for payslip in payslips:
             if payslip.pdf_page_num is None:
                 continue
@@ -176,7 +177,8 @@ def export_bulk_payslips_pdf():
                 if not batch or not batch.pdf_filename:
                     continue
 
-                storage_path = f"{batch.month_year}/{batch.pdf_filename}"
+                safe_filename = urllib.parse.quote(batch.pdf_filename)
+                storage_path = f"{batch.month_year}/{safe_filename}"
                 pdf_bytes = io.BytesIO()
 
                 if supabase_url and supabase_key:
@@ -195,7 +197,7 @@ def export_bulk_payslips_pdf():
                                     break
                                 f.write(chunk)
                                 
-                        batch_cache[batch_id] = fitz.open(tmp_path)
+                        batch_cache[batch_id] = PdfReader(tmp_path)
                     except Exception as e:
                         current_app.logger.error(f"Failed to download from cloud: {e}")
                         continue
@@ -205,16 +207,17 @@ def export_bulk_payslips_pdf():
                         with open(pdf_path, 'rb') as f:
                             pdf_bytes.write(f.read())
                         pdf_bytes.seek(0)
-                        batch_cache[batch_id] = fitz.open(stream=pdf_bytes.read(), filetype="pdf")
+                        batch_cache[batch_id] = PdfReader(pdf_bytes)
 
             source_doc = batch_cache.get(batch_id)
-            if source_doc and payslip.pdf_page_num < source_doc.page_count:
-                merged_doc.insert_pdf(source_doc, from_page=payslip.pdf_page_num, to_page=payslip.pdf_page_num)
+            if source_doc and payslip.pdf_page_num < len(source_doc.pages):
+                writer.add_page(source_doc.pages[payslip.pdf_page_num])
 
-        if merged_doc.page_count == 0:
+        if len(writer.pages) == 0:
             return jsonify({"error": "Failed to generate any valid pages."}), 404
 
-        out_bytes = io.BytesIO(merged_doc.write())
+        out_bytes = io.BytesIO()
+        writer.write(out_bytes)
         out_bytes.seek(0)
 
         filename = f"Bulk_Payslips_{month_year}.pdf"
@@ -255,14 +258,15 @@ def export_employee_bulk_payslips_pdf():
     from ..models.upload_batch import UploadBatch
     from flask import current_app
     import os
-    import fitz  # PyMuPDF
+    import urllib.parse
+    from PyPDF2 import PdfReader, PdfWriter
     
     supabase_url = current_app.config.get("SUPABASE_URL")
     supabase_key = current_app.config.get("SUPABASE_KEY")
     batch_cache = {}
 
     try:
-        merged_doc = fitz.open()
+        writer = PdfWriter()
         for payslip in payslips:
             if payslip.pdf_page_num is None:
                 continue
@@ -273,7 +277,8 @@ def export_employee_bulk_payslips_pdf():
                 if not batch or not batch.pdf_filename:
                     continue
 
-                storage_path = f"{batch.month_year}/{batch.pdf_filename}"
+                safe_filename = urllib.parse.quote(batch.pdf_filename)
+                storage_path = f"{batch.month_year}/{safe_filename}"
                 pdf_bytes = io.BytesIO()
 
                 if supabase_url and supabase_key:
@@ -292,7 +297,7 @@ def export_employee_bulk_payslips_pdf():
                                     break
                                 f.write(chunk)
                                 
-                        batch_cache[batch_id] = fitz.open(tmp_path)
+                        batch_cache[batch_id] = PdfReader(tmp_path)
                     except Exception as e:
                         current_app.logger.error(f"Failed to download from cloud: {e}")
                         continue
@@ -302,16 +307,17 @@ def export_employee_bulk_payslips_pdf():
                         with open(pdf_path, 'rb') as f:
                             pdf_bytes.write(f.read())
                         pdf_bytes.seek(0)
-                        batch_cache[batch_id] = fitz.open(stream=pdf_bytes.read(), filetype="pdf")
+                        batch_cache[batch_id] = PdfReader(pdf_bytes)
 
             source_doc = batch_cache.get(batch_id)
-            if source_doc and payslip.pdf_page_num < source_doc.page_count:
-                merged_doc.insert_pdf(source_doc, from_page=payslip.pdf_page_num, to_page=payslip.pdf_page_num)
+            if source_doc and payslip.pdf_page_num < len(source_doc.pages):
+                writer.add_page(source_doc.pages[payslip.pdf_page_num])
 
-        if merged_doc.page_count == 0:
+        if len(writer.pages) == 0:
             return jsonify({"error": "Failed to generate any valid pages."}), 404
 
-        out_bytes = io.BytesIO(merged_doc.write())
+        out_bytes = io.BytesIO()
+        writer.write(out_bytes)
         out_bytes.seek(0)
 
         filename = f"Employee_{employee_id}_Payslips.pdf"
