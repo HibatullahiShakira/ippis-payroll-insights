@@ -72,16 +72,20 @@ def parse_pdf(filepath, batch_id, month_year):
 
         for page_num in range(total_pages):
             try:
+                # Create a savepoint for this specific page
+                nested = db.session.begin_nested()
                 page = doc.load_page(page_num)
                 # get_text("text") mimics pdfplumber's reading order output almost perfectly
                 text = page.get_text("text")
                 page = None # Free page object from memory early
                 
                 if not text:
+                    nested.rollback()
                     continue
 
                 payslip_data = _parse_page_text(text)
                 if not payslip_data or not payslip_data.get("ippis_number"):
+                    nested.rollback()
                     continue
 
                 payslip_data["pdf_page_num"] = page_num
@@ -132,7 +136,6 @@ def parse_pdf(filepath, batch_id, month_year):
                     payslip.cumulative_income = payslip_data.get("cumulative_income")
                     payslip.cumulative_pension = payslip_data.get("cumulative_pension")
                     payslip.cumulative_nhf = payslip_data.get("cumulative_nhf")
-                    payslip.net_pay = payslip_data.get("net_pay", 0.0)
                     payslip.pdf_page_num = page_num
                     target_payslip = payslip
                 else:
@@ -160,7 +163,6 @@ def parse_pdf(filepath, batch_id, month_year):
                         cumulative_income=payslip_data.get("cumulative_income"),
                         cumulative_pension=payslip_data.get("cumulative_pension"),
                         cumulative_nhf=payslip_data.get("cumulative_nhf"),
-                        net_pay=payslip_data.get("net_pay", 0.0),
                         pdf_page_num=page_num,
                     )
                     db.session.add(payslip)
@@ -185,6 +187,7 @@ def parse_pdf(filepath, batch_id, month_year):
                     ))
 
                 count += 1
+                nested.commit()  # Release savepoint on success
 
                 # Batch commit and update progress
                 if count % 50 == 0:
@@ -193,6 +196,7 @@ def parse_pdf(filepath, batch_id, month_year):
                     db.session.commit()
 
             except Exception as e:
+                nested.rollback()  # Rollback only this page on error
                 # Log error but continue processing other pages
                 print(f"Error parsing page {page_num + 1}: {e}")
                 continue
@@ -452,3 +456,4 @@ def _parse_amount(amount_str):
         return Decimal(cleaned)
     except (InvalidOperation, ValueError):
         return None
+
