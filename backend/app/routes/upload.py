@@ -97,32 +97,45 @@ def _process_upload(app, batch_id, excel_path, pdf_path, month_year):
     with app.app_context():
         batch = UploadBatch.query.get(batch_id)
         
-        # Upload PDF to Supabase in background to prevent HTTP timeouts
-        if pdf_path and os.path.exists(pdf_path):
-            supabase = get_supabase()
-            if supabase:
+        supabase_url = app.config.get("SUPABASE_URL")
+        supabase_key = app.config.get("SUPABASE_KEY")
+        if pdf_path and os.path.exists(pdf_path) and supabase_url and supabase_key:
+            try:
+                import urllib.request
+                pdf_filename = os.path.basename(pdf_path)
+                storage_path = f"{month_year}/{pdf_filename}"
+                upload_url = f"{supabase_url}/storage/v1/object/payslips/{storage_path}"
+                with open(pdf_path, 'rb') as f:
+                    req = urllib.request.Request(
+                        upload_url,
+                        data=f.read(),
+                        headers={
+                            "Authorization": f"Bearer {supabase_key}",
+                            "apikey": supabase_key,
+                            "Content-Type": "application/pdf"
+                        },
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=120) as res:
+                        pass
+            except Exception as e:
+                # If it already exists, try PUT to update
                 try:
-                    pdf_filename = os.path.basename(pdf_path)
-                    storage_path = f"{month_year}/{pdf_filename}"
                     with open(pdf_path, 'rb') as f:
-                        supabase.storage.from_("payslips").upload(
-                            file=f,
-                            path=storage_path,
-                            file_options={"content-type": "application/pdf"}
+                        req = urllib.request.Request(
+                            upload_url,
+                            data=f.read(),
+                            headers={
+                                "Authorization": f"Bearer {supabase_key}",
+                                "apikey": supabase_key,
+                                "Content-Type": "application/pdf"
+                            },
+                            method="PUT"
                         )
-                except Exception as e:
-                    if "already" in str(e).lower() or "duplicate" in str(e).lower():
-                        try:
-                            with open(pdf_path, 'rb') as f:
-                                supabase.storage.from_("payslips").update(
-                                    file=f,
-                                    path=storage_path,
-                                    file_options={"content-type": "application/pdf"}
-                                )
-                        except Exception as e2:
-                            print(f"Supabase update failed: {e2}")
-                    else:
-                        print(f"Supabase upload failed: {e}")
+                        with urllib.request.urlopen(req, timeout=120) as res:
+                            pass
+                except Exception as e2:
+                    print(f"Supabase update failed: {e2}")
 
         try:
             total = 0
@@ -150,7 +163,7 @@ def _process_upload(app, batch_id, excel_path, pdf_path, month_year):
             db.session.commit()
         finally:
             # Cleanup temporary files if uploaded to Supabase
-            if get_supabase():
+            if supabase_url and supabase_key:
                 try:
                     if pdf_path and os.path.exists(pdf_path):
                         os.remove(pdf_path)

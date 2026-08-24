@@ -102,7 +102,8 @@ def get_payslip_pdf(payslip_id):
     if not batch or not batch.pdf_filename:
         return jsonify({"error": "Original PDF file not found."}), 404
 
-    supabase = get_supabase()
+    supabase_url = current_app.config.get("SUPABASE_URL")
+    supabase_key = current_app.config.get("SUPABASE_KEY")
     storage_path = f"{batch.month_year}/{batch.pdf_filename}"
     
     try:
@@ -110,10 +111,13 @@ def get_payslip_pdf(payslip_id):
         
         pdf_bytes = io.BytesIO()
         
-        if supabase:
+        if supabase_url and supabase_key:
             try:
-                res = supabase.storage.from_("payslips").download(storage_path)
-                pdf_bytes.write(res)
+                import urllib.request
+                download_url = f"{supabase_url}/storage/v1/object/authenticated/payslips/{storage_path}"
+                req = urllib.request.Request(download_url, headers={"Authorization": f"Bearer {supabase_key}", "apikey": supabase_key})
+                with urllib.request.urlopen(req, timeout=120) as dl_res:
+                    pdf_bytes.write(dl_res.read())
                 pdf_bytes.seek(0)
             except Exception as e:
                 return jsonify({"error": f"Failed to download PDF from cloud: {str(e)}"}), 404

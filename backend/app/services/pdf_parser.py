@@ -94,15 +94,9 @@ def parse_pdf(filepath, batch_id, month_year):
                 ippis = payslip_data["ippis_number"]
                 employee_id = employee_id_by_ippis.get(ippis)
 
-                # Extract numeric grade level from payslip (e.g. "GL13_CONPSS" -> "13")
-                raw_grade = payslip_data.get("grade")
-                extracted_gl = None
-                if raw_grade:
-                    m = re.search(r'\d+', raw_grade)
-                    if m:
-                        extracted_gl = m.group(0).zfill(2)
-                    else:
-                        extracted_gl = raw_grade[:10]
+                # Get the grade and use the full grade string
+                grade_str = payslip_data.get("grade")
+                extracted_gl = grade_str if grade_str else None
 
                 if not employee_id:
                     # Create a minimal employee record if not found in Excel

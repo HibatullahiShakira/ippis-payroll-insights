@@ -148,19 +148,55 @@ def export_bulk_payslips_pdf():
         if gl_list:
             query = query.filter(Employee.gl.in_(gl_list))
 
+    employee_ids = request.args.get("employee_ids", "")
+    if employee_ids:
+        ids = [int(i.strip()) for i in employee_ids.split(",") if i.strip()]
+        if ids:
+            query = query.filter(Employee.id.in_(ids))
+
     payslips = query.order_by(Employee.name).all()
 
     if not payslips:
         return jsonify({"error": "No payslips found for given criteria."}), 404
 
     from ..models.upload_batch import UploadBatch
-    from ..extensions import get_supabase
-    import fitz  # PyMuPDF
     from flask import current_app
     import os
 
+    # Fast-path optimization: if no sub-filters are applied, return the original PDF directly
+    if not (department or division or gl or employee_ids):
+        batch_ids = {p.batch_id for p in payslips if p.batch_id is not None}
+        if len(batch_ids) == 1:
+            batch_id = list(batch_ids)[0]
+            batch = UploadBatch.query.get(batch_id)
+            supabase_url = current_app.config.get("SUPABASE_URL")
+            supabase_key = current_app.config.get("SUPABASE_KEY")
+            if batch and batch.pdf_filename and supabase_url and supabase_key:
+                try:
+                    import urllib.request
+                    storage_path = f"{batch.month_year}/{batch.pdf_filename}"
+                    download_url = f"{supabase_url}/storage/v1/object/authenticated/payslips/{storage_path}"
+                    req = urllib.request.Request(
+                        download_url,
+                        headers={"Authorization": f"Bearer {supabase_key}", "apikey": supabase_key}
+                    )
+                    with urllib.request.urlopen(req, timeout=120) as dl_res:
+                        pdf_bytes = io.BytesIO(dl_res.read())
+                        pdf_bytes.seek(0)
+                        return send_file(
+                            pdf_bytes,
+                            mimetype="application/pdf",
+                            as_attachment=True,
+                            download_name=f"Bulk_Payslips_{month_year}.pdf"
+                        )
+                except Exception as e:
+                    print(f"Fast-path download failed: {e}")
+                    # If fast path fails, fallback to standard fitz merge
+
     merged_doc = fitz.open()
-    supabase = get_supabase()
+
+    supabase_url = current_app.config.get("SUPABASE_URL")
+    supabase_key = current_app.config.get("SUPABASE_KEY")
 
     # We need to fetch the original PDFs. We can cache them by batch_id to avoid downloading the same PDF multiple times
     batch_cache = {}
@@ -179,15 +215,13 @@ def export_bulk_payslips_pdf():
                 storage_path = f"{batch.month_year}/{batch.pdf_filename}"
                 pdf_bytes = io.BytesIO()
 
-                if supabase:
+                if supabase_url and supabase_key:
                     try:
                         # Use urllib.request directly to avoid supabase-py httpx 5s timeout and missing requests dependency
                         import urllib.request
                         import tempfile
-                        url = current_app.config.get("SUPABASE_URL")
-                        key = current_app.config.get("SUPABASE_KEY")
-                        download_url = f"{url}/storage/v1/object/authenticated/payslips/{storage_path}"
-                        req = urllib.request.Request(download_url, headers={"Authorization": f"Bearer {key}", "apikey": key})
+                        download_url = f"{supabase_url}/storage/v1/object/authenticated/payslips/{storage_path}"
+                        req = urllib.request.Request(download_url, headers={"Authorization": f"Bearer {supabase_key}", "apikey": supabase_key})
                         
                         fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
                         with urllib.request.urlopen(req, timeout=120) as dl_res, os.fdopen(fd, 'wb') as f:
@@ -255,13 +289,13 @@ def export_employee_bulk_payslips_pdf():
         return jsonify({"error": "No payslips found for this employee."}), 404
 
     from ..models.upload_batch import UploadBatch
-    from ..extensions import get_supabase
-    import fitz  # PyMuPDF
     from flask import current_app
     import os
 
     merged_doc = fitz.open()
-    supabase = get_supabase()
+    
+    supabase_url = current_app.config.get("SUPABASE_URL")
+    supabase_key = current_app.config.get("SUPABASE_KEY")
     batch_cache = {}
 
     try:
@@ -278,15 +312,13 @@ def export_employee_bulk_payslips_pdf():
                 storage_path = f"{batch.month_year}/{batch.pdf_filename}"
                 pdf_bytes = io.BytesIO()
 
-                if supabase:
+                if supabase_url and supabase_key:
                     try:
                         # Use urllib.request directly to avoid supabase-py httpx 5s timeout
                         import urllib.request
                         import tempfile
-                        url = current_app.config.get("SUPABASE_URL")
-                        key = current_app.config.get("SUPABASE_KEY")
-                        download_url = f"{url}/storage/v1/object/authenticated/payslips/{storage_path}"
-                        req = urllib.request.Request(download_url, headers={"Authorization": f"Bearer {key}", "apikey": key})
+                        download_url = f"{supabase_url}/storage/v1/object/authenticated/payslips/{storage_path}"
+                        req = urllib.request.Request(download_url, headers={"Authorization": f"Bearer {supabase_key}", "apikey": supabase_key})
                         
                         fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
                         with urllib.request.urlopen(req, timeout=120) as dl_res, os.fdopen(fd, 'wb') as f:
