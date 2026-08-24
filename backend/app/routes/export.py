@@ -156,8 +156,7 @@ def export_bulk_payslips_pdf():
     from ..models.upload_batch import UploadBatch
     from flask import current_app
     import os
-
-    merged_doc = fitz.open()
+    import fitz  # PyMuPDF
 
     supabase_url = current_app.config.get("SUPABASE_URL")
     supabase_key = current_app.config.get("SUPABASE_KEY")
@@ -166,6 +165,7 @@ def export_bulk_payslips_pdf():
     batch_cache = {}
 
     try:
+        merged_doc = fitz.open()
         for payslip in payslips:
             if payslip.pdf_page_num is None:
                 continue
@@ -255,14 +255,14 @@ def export_employee_bulk_payslips_pdf():
     from ..models.upload_batch import UploadBatch
     from flask import current_app
     import os
-
-    merged_doc = fitz.open()
+    import fitz  # PyMuPDF
     
     supabase_url = current_app.config.get("SUPABASE_URL")
     supabase_key = current_app.config.get("SUPABASE_KEY")
     batch_cache = {}
 
     try:
+        merged_doc = fitz.open()
         for payslip in payslips:
             if payslip.pdf_page_num is None:
                 continue
