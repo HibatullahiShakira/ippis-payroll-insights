@@ -7,6 +7,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _database_uri(url):
+    """
+    Pin PostgreSQL URLs to the psycopg2 driver that requirements.txt installs.
+
+    A bare 'postgresql://' lets SQLAlchemy pick its default driver, which changed
+    to psycopg (v3) in SQLAlchemy 2.1, and 'postgres://' is not accepted at all.
+    """
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg2://" + url[len(prefix):]
+    return url
+
+
 class Config:
     """Base configuration."""
     SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-change-in-production")
@@ -14,7 +28,7 @@ class Config:
     # Use SQLite by default for local dev, unless DATABASE_URL is explicitly set (e.g., in Docker)
     base_dir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
     default_db = f"sqlite:///{os.path.join(base_dir, 'payroll.db')}"
-    SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL", default_db)
+    SQLALCHEMY_DATABASE_URI = _database_uri(os.environ.get("DATABASE_URL") or default_db)
     
     SUPABASE_URL = os.environ.get("SUPABASE_URL")
     SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
