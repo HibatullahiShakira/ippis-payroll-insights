@@ -2,13 +2,15 @@
 
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
-from sqlalchemy import or_
 
 from ..extensions import db
 from ..models.employee import Employee
 from ..models.payslip import Payslip
+from ..utils import apply_employee_filters
 
 employees_bp = Blueprint("employees", __name__)
+
+SORTABLE_FIELDS = {"name", "file_no", "ippis_number", "department", "division", "gl"}
 
 
 @employees_bp.route("/employees", methods=["GET"])
@@ -20,41 +22,23 @@ def list_employees():
     Query params:
         search   - General text search (name, file_no, ippis_number)
         name     - Filter by name (partial match)
-        department - Filter by department (exact or partial)
-        division - Filter by division (exact or partial)
+        department - Filter by department (exact, case-insensitive)
+        division - Filter by division (exact, case-insensitive)
         file_no  - Filter by file number (exact)
         ippis_number - Filter by IPPIS number (exact)
-        gl       - Filter by grade level (exact)
+        gl       - Filter by grade level (comma-separated list)
         page     - Page number (default 1)
         per_page - Items per page (default 25, max 100)
         sort_by  - Sort field (name, file_no, ippis_number, department, gl)
         sort_order - asc or desc (default asc)
     """
-    query = Employee.query
-
-    # General search (searches across name, file_no, ippis_number)
-    search = request.args.get("search", "").strip()
-    if search:
-        query = query.filter(
-            or_(
-                Employee.name.ilike(f"%{search}%"),
-                Employee.file_no.cast(db.String).like(f"%{search}%"),
-                Employee.ippis_number.cast(db.String).like(f"%{search}%"),
-            )
-        )
+    # General search + department / division / GL filters (shared with the exports)
+    query = apply_employee_filters(Employee.query, request.args)
 
     # Specific field filters
     name = request.args.get("name", "").strip()
     if name:
         query = query.filter(Employee.name.ilike(f"%{name}%"))
-
-    department = request.args.get("department", "").strip()
-    if department:
-        query = query.filter(Employee.department.ilike(f"%{department}%"))
-
-    division = request.args.get("division", "").strip()
-    if division:
-        query = query.filter(Employee.division.ilike(f"%{division}%"))
 
     file_no = request.args.get("file_no", "").strip()
     if file_no:
@@ -70,20 +54,14 @@ def list_employees():
         except ValueError:
             pass
 
-    gl = request.args.get("gl", "").strip()
-    if gl:
-        gl_list = [g.strip() for g in gl.split(",") if g.strip()]
-        if gl_list:
-            query = query.filter(Employee.gl.in_(gl_list))
-
     # Sorting
     sort_by = request.args.get("sort_by", "name")
     sort_order = request.args.get("sort_order", "asc")
-    sort_column = getattr(Employee, sort_by, Employee.name)
+    sort_column = getattr(Employee, sort_by) if sort_by in SORTABLE_FIELDS else Employee.name
     if sort_order == "desc":
-        query = query.order_by(sort_column.desc())
+        query = query.order_by(sort_column.desc(), Employee.id)
     else:
-        query = query.order_by(sort_column.asc())
+        query = query.order_by(sort_column.asc(), Employee.id)
 
     # Pagination
     page = request.args.get("page", 1, type=int)
@@ -166,7 +144,7 @@ def list_divisions():
     query = db.session.query(Employee.division).distinct().filter(Employee.division.isnot(None))
 
     if department:
-        query = query.filter(Employee.department.ilike(f"%{department}%"))
+        query = apply_employee_filters(query, {"department": department})
 
     divisions = query.order_by(Employee.division).all()
     return jsonify({"divisions": [d[0] for d in divisions]})

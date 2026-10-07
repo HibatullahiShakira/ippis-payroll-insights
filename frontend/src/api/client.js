@@ -23,7 +23,9 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    // A 401 from the login form itself just means wrong credentials — let the form show it
+    const isLoginRequest = error.config?.url?.includes('/auth/login');
+    if (error.response?.status === 401 && !isLoginRequest) {
       localStorage.removeItem('token');
       localStorage.removeItem('user');
       window.location.href = '/login';
@@ -85,6 +87,10 @@ export const exportAPI = {
     api.get('/export/payslips', { params, responseType: 'blob' }),
   bulkPayslipsPDF: (params) =>
     api.get('/export/bulk-payslips', { params, responseType: 'blob' }),
+  departmentPayslips: (monthYear) =>
+    api.get('/export/department-payslips', { params: { month_year: monthYear } }),
+  departmentPayslipsZip: (monthYear) =>
+    api.get('/export/department-payslips/zip', { params: { month_year: monthYear }, responseType: 'blob' }),
   employeeBulkPayslipsPDF: (params) =>
     api.get('/export/employee-bulk-payslips', { params, responseType: 'blob' }),
 };

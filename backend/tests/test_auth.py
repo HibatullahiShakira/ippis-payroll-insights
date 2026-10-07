@@ -26,21 +26,50 @@ def test_register_route(client, db_session):
     assert user is not None
     assert user.full_name == "New User"
 
-def test_register_duplicate(client, db_session):
-    """Test duplicate registration fails."""
-    # Create first user
-    user = User(username="existing", email="existing@example.com", full_name="Existing")
+def test_register_first_user_is_admin(client, db_session):
+    """The first account created on an empty system becomes the administrator."""
+    response = client.post('/api/auth/register', json={
+        "username": "first",
+        "email": "first@example.com",
+        "password": "password123",
+        "full_name": "First User"
+    })
+    assert response.status_code == 201
+    assert User.query.filter_by(username="first").first().is_admin is True
+
+def test_register_requires_admin_once_users_exist(client, db_session, auth_headers):
+    """Anonymous visitors cannot create accounts (or make themselves admin)."""
+    payload = {
+        "username": "intruder",
+        "email": "intruder@example.com",
+        "password": "password123",
+        "full_name": "Intruder",
+        "is_admin": True
+    }
+    assert client.post('/api/auth/register', json=payload).status_code == 401
+    assert User.query.filter_by(username="intruder").first() is None
+
+    # A non-admin account is refused too
+    user = User(username="clerk", email="clerk@example.com", full_name="Clerk")
     user.set_password("pass")
     db_session.add(user)
     db_session.commit()
-    
-    # Try creating same user
+    token = client.post('/api/auth/login', json={"username": "clerk", "password": "pass"}).get_json()["access_token"]
+    response = client.post('/api/auth/register', json=payload, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 403
+
+    # An admin can
+    assert client.post('/api/auth/register', json=payload, headers=auth_headers).status_code == 201
+
+def test_register_duplicate(client, db_session, auth_headers):
+    """Test duplicate registration fails."""
+    # Try creating a user that already exists (the admin from auth_headers)
     response = client.post('/api/auth/register', json={
-        "username": "existing",
+        "username": "testadmin",
         "email": "other@example.com",
         "password": "password123",
         "full_name": "Other"
-    })
+    }, headers=auth_headers)
     assert response.status_code == 409
     assert "already exists" in response.get_json()["error"]
 

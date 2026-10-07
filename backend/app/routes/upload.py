@@ -6,13 +6,15 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from werkzeug.utils import secure_filename
 
-from ..extensions import db, get_supabase
+from ..extensions import db
 from ..models.upload_batch import UploadBatch
 from ..models.payslip import Payslip
 from ..models.payslip_earning import PayslipEarning
 from ..models.payslip_deduction import PayslipDeduction
 from ..services.excel_parser import parse_excel
 from ..services.pdf_parser import parse_pdf
+from ..services.pdf_export import STORAGE_BUCKET, storage_object_path
+from ..utils import admin_required, is_valid_month_year
 
 upload_bp = Blueprint("upload", __name__)
 
@@ -31,16 +33,25 @@ def allowed_file(filename, allowed_extensions):
 def upload_files():
     """Upload Excel and/or PDF payslip files for a given month."""
     user_id = get_jwt_identity()
-    month_year = request.form.get("month_year")
+    month_year = request.form.get("month_year", "").strip()
 
-    if not month_year:
-        return jsonify({"error": "'month_year' is required (e.g., '2026-04')"}), 400
+    # month_year becomes a folder name, so it must be strictly validated
+    if not is_valid_month_year(month_year):
+        return jsonify({"error": "'month_year' is required in YYYY-MM format (e.g., '2026-04')"}), 400
 
     excel_file = request.files.get("excel_file")
     pdf_file = request.files.get("pdf_file")
+    has_excel = bool(excel_file and excel_file.filename)
+    has_pdf = bool(pdf_file and pdf_file.filename)
 
-    if not excel_file and not pdf_file:
+    if not has_excel and not has_pdf:
         return jsonify({"error": "At least one file (Excel or PDF) is required"}), 400
+
+    # Validate both files before anything is written to disk
+    if has_excel and not allowed_file(excel_file.filename, ALLOWED_EXCEL):
+        return jsonify({"error": "Excel file must be .xlsx or .xls"}), 400
+    if has_pdf and not allowed_file(pdf_file.filename, ALLOWED_PDF):
+        return jsonify({"error": "PDF file must be .pdf"}), 400
 
     # Create upload directory for this batch
     upload_dir = os.path.join(current_app.config["UPLOAD_FOLDER"], month_year)
@@ -55,20 +66,16 @@ def upload_files():
 
     # Save Excel file
     excel_path = None
-    if excel_file and excel_file.filename:
-        if not allowed_file(excel_file.filename, ALLOWED_EXCEL):
-            return jsonify({"error": "Excel file must be .xlsx or .xls"}), 400
-        excel_filename = secure_filename(excel_file.filename)
+    if has_excel:
+        excel_filename = secure_filename(excel_file.filename) or "nominal_roll.xlsx"
         excel_path = os.path.join(upload_dir, excel_filename)
         excel_file.save(excel_path)
         batch.excel_filename = excel_filename
 
     # Save PDF file
     pdf_path = None
-    if pdf_file and pdf_file.filename:
-        if not allowed_file(pdf_file.filename, ALLOWED_PDF):
-            return jsonify({"error": "PDF file must be .pdf"}), 400
-        pdf_filename = secure_filename(pdf_file.filename)
+    if has_pdf:
+        pdf_filename = secure_filename(pdf_file.filename) or "payslips.pdf"
         pdf_path = os.path.join(upload_dir, pdf_filename)
         pdf_file.save(pdf_path)
         batch.pdf_filename = pdf_filename
@@ -95,16 +102,17 @@ def upload_files():
 def _process_upload(app, batch_id, excel_path, pdf_path, month_year):
     """Background task to parse uploaded files."""
     with app.app_context():
-        batch = UploadBatch.query.get(batch_id)
-        
+        batch = db.session.get(UploadBatch, batch_id)
+
         supabase_url = app.config.get("SUPABASE_URL")
         supabase_key = app.config.get("SUPABASE_KEY")
+        pdf_stored_in_cloud = False
+        storage_warning = None
         if pdf_path and os.path.exists(pdf_path) and supabase_url and supabase_key:
             try:
                 import urllib.request
-                pdf_filename = os.path.basename(pdf_path)
-                storage_path = f"{month_year}/{pdf_filename}"
-                upload_url = f"{supabase_url}/storage/v1/object/payslips/{storage_path}"
+                object_path = storage_object_path(month_year, os.path.basename(pdf_path))
+                upload_url = f"{supabase_url}/storage/v1/object/{STORAGE_BUCKET}/{object_path}"
                 with open(pdf_path, 'rb') as f:
                     req = urllib.request.Request(
                         upload_url,
@@ -112,30 +120,21 @@ def _process_upload(app, batch_id, excel_path, pdf_path, month_year):
                         headers={
                             "Authorization": f"Bearer {supabase_key}",
                             "apikey": supabase_key,
-                            "Content-Type": "application/pdf"
+                            "Content-Type": "application/pdf",
+                            # Replace the file if this month was uploaded before
+                            "x-upsert": "true",
                         },
                         method="POST"
                     )
-                    with urllib.request.urlopen(req, timeout=120) as res:
-                        pass
+                with urllib.request.urlopen(req, timeout=300):
+                    pass
+                pdf_stored_in_cloud = True
             except Exception as e:
-                # If it already exists, try PUT to update
-                try:
-                    with open(pdf_path, 'rb') as f:
-                        req = urllib.request.Request(
-                            upload_url,
-                            data=f.read(),
-                            headers={
-                                "Authorization": f"Bearer {supabase_key}",
-                                "apikey": supabase_key,
-                                "Content-Type": "application/pdf"
-                            },
-                            method="PUT"
-                        )
-                        with urllib.request.urlopen(req, timeout=120) as res:
-                            pass
-                except Exception as e2:
-                    print(f"Supabase update failed: {e2}")
+                app.logger.error(f"Supabase upload failed for batch {batch_id}: {e}")
+                storage_warning = (
+                    "Records were processed, but the PDF could not be saved to cloud storage, "
+                    f"so payslip PDF downloads may be unavailable for this month ({e})."
+                )
 
         try:
             total = 0
@@ -153,24 +152,29 @@ def _process_upload(app, batch_id, excel_path, pdf_path, month_year):
             batch.total_records = total
             batch.records_processed = total
             batch.status = "completed"
+            batch.error_message = storage_warning
             db.session.commit()
 
         except Exception as e:
+            app.logger.exception(f"Processing upload batch {batch_id} failed")
             db.session.rollback()
-            batch = UploadBatch.query.get(batch_id)
-            batch.status = "failed"
-            batch.error_message = str(e)
-            db.session.commit()
+            batch = db.session.get(UploadBatch, batch_id)
+            if batch:
+                batch.status = "failed"
+                batch.error_message = str(e)
+                db.session.commit()
         finally:
-            # Cleanup temporary files if uploaded to Supabase
+            # Cleanup temporary files if uploaded to Supabase.
+            # The PDF is kept locally when the cloud copy failed, so it stays downloadable.
             if supabase_url and supabase_key:
                 try:
-                    if pdf_path and os.path.exists(pdf_path):
+                    if pdf_stored_in_cloud and os.path.exists(pdf_path):
                         os.remove(pdf_path)
                     if excel_path and os.path.exists(excel_path):
                         os.remove(excel_path)
                 except Exception as e:
-                    print(f"Failed to cleanup temp files: {e}")
+                    app.logger.warning(f"Failed to cleanup temp files: {e}")
+            db.session.remove()
 
 
 @upload_bp.route("/uploads", methods=["GET"])
@@ -190,9 +194,11 @@ def upload_status(batch_id):
 
 
 @upload_bp.route("/uploads/month/<month_year>", methods=["DELETE"])
-@jwt_required()
+@admin_required
 def delete_month_data(month_year):
-    """Delete all payslips, earnings, deductions, and batches for a specific month_year."""
+    """Delete all payslips, earnings, deductions, and batches for a specific month_year (admin only)."""
+    if not is_valid_month_year(month_year):
+        return jsonify({"error": "month_year must be in YYYY-MM format"}), 400
     try:
         payslips = Payslip.query.filter_by(month_year=month_year).all()
         payslip_ids = [p.id for p in payslips]

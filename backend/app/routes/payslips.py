@@ -2,13 +2,11 @@
 
 from flask import Blueprint, request, jsonify, send_file, current_app
 from flask_jwt_extended import jwt_required
-import os
 import io
 
 from ..models.payslip import Payslip
 from ..models.employee import Employee
-from ..models.upload_batch import UploadBatch
-from ..extensions import get_supabase
+from ..services.pdf_export import PdfSources, merge_payslip_pages, safe_filename
 
 payslips_bp = Blueprint("payslips", __name__)
 
@@ -98,60 +96,25 @@ def get_payslip_pdf(payslip_id):
     if payslip.pdf_page_num is None:
         return jsonify({"error": "No PDF page associated with this payslip."}), 404
 
-    batch = UploadBatch.query.get(payslip.batch_id)
-    if not batch or not batch.pdf_filename:
-        return jsonify({"error": "Original PDF file not found."}), 404
-
-    supabase_url = current_app.config.get("SUPABASE_URL")
-    supabase_key = current_app.config.get("SUPABASE_KEY")
-    storage_path = f"{batch.month_year}/{batch.pdf_filename}"
-    
     try:
-        import fitz  # PyMuPDF
-        
-        pdf_bytes = io.BytesIO()
-        
-        if supabase_url and supabase_key:
-            try:
-                import urllib.request
-                download_url = f"{supabase_url}/storage/v1/object/authenticated/payslips/{storage_path}"
-                req = urllib.request.Request(download_url, headers={"Authorization": f"Bearer {supabase_key}", "apikey": supabase_key})
-                with urllib.request.urlopen(req, timeout=120) as dl_res:
-                    pdf_bytes.write(dl_res.read())
-                pdf_bytes.seek(0)
-            except Exception as e:
-                return jsonify({"error": f"Failed to download PDF from cloud: {str(e)}"}), 404
-        else:
-            pdf_path = os.path.join(current_app.config["UPLOAD_FOLDER"], batch.month_year, batch.pdf_filename)
-            if not os.path.exists(pdf_path):
-                return jsonify({"error": "PDF file is missing from server."}), 404
-            with open(pdf_path, 'rb') as f:
-                pdf_bytes.write(f.read())
-            pdf_bytes.seek(0)
-        
-        doc = fitz.open(stream=pdf_bytes.read(), filetype="pdf")
-        if payslip.pdf_page_num >= doc.page_count:
-            return jsonify({"error": "Page number out of bounds."}), 400
-            
-        new_doc = fitz.open()
-        new_doc.insert_pdf(doc, from_page=payslip.pdf_page_num, to_page=payslip.pdf_page_num)
-        
-        out_bytes = io.BytesIO(new_doc.write())
-        out_bytes.seek(0)
-        
-        safe_name = employee.name.replace(' ', '_') if employee else "Employee"
-        filename = f"Payslip_{safe_name}_{payslip.month_year}.pdf"
-        
-        return send_file(
-            out_bytes,
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name=filename
-        )
+        with PdfSources() as sources:
+            if not sources.path_for(payslip.batch_id):
+                return jsonify({"error": "Original PDF file not found. Re-upload the bulk PDF for this month."}), 404
+            pdf_bytes, _ = merge_payslip_pages([(payslip.batch_id, payslip.pdf_page_num)], sources)
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        current_app.logger.exception("Payslip PDF export failed")
         return jsonify({"error": f"Failed to generate PDF: {str(e)}"}), 500
+
+    if pdf_bytes is None:
+        return jsonify({"error": "This payslip's page is missing from the original PDF."}), 404
+
+    name = safe_filename(employee.name if employee else "", "Employee")
+    return send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"Payslip_{name}_{payslip.month_year}.pdf",
+    )
 
 
 @payslips_bp.route("/payslips/months", methods=["GET"])

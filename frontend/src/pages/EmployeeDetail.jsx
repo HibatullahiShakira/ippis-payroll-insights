@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { FiArrowLeft, FiUser, FiBriefcase, FiCreditCard, FiFileText } from 'react-icons/fi';
 import { employeesAPI, payslipsAPI, exportAPI } from '../api/client';
+import { getErrorMessage, saveBlob, openPdfTab, safeFilename, formatMonthYear } from '../utils/download';
 
 export default function EmployeeDetail() {
   const { id } = useParams();
@@ -64,24 +65,21 @@ export default function EmployeeDetail() {
 
   const handleDownloadPdf = async (viewOnly = false) => {
     if (!selectedPayslipId || !fullPayslip) return;
+    const tab = viewOnly ? openPdfTab() : null;
     setPdfLoading(true);
     try {
       const res = await payslipsAPI.getPdfBlob(selectedPayslipId);
       const file = new Blob([res.data], { type: 'application/pdf' });
-      const fileURL = URL.createObjectURL(file);
-      
+
       if (viewOnly) {
-        window.open(fileURL, '_blank');
+        tab.show(file);
       } else {
-        const link = document.createElement('a');
-        link.href = fileURL;
-        const safeName = employee.name.replace(/ /g, '_');
-        link.download = `Payslip_${safeName}_${fullPayslip.month_year}.pdf`;
-        link.click();
+        saveBlob(file, `Payslip_${safeFilename(employee.name, 'Employee')}_${fullPayslip.month_year}.pdf`);
       }
     } catch (err) {
       console.error("Failed to download PDF:", err);
-      alert("Failed to get PDF. Note: You may need to re-upload the bulk PDF so the system can save page numbers.");
+      tab?.close();
+      alert(await getErrorMessage(err, "Failed to get PDF. Note: You may need to re-upload the bulk PDF so the system can save page numbers."));
     } finally {
       setPdfLoading(false);
     }
@@ -90,19 +88,6 @@ export default function EmployeeDetail() {
   const formatCurrency = (amount) => {
     if (amount === null || amount === undefined) return '₦0.00';
     return `₦${amount.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  };
-
-  const formatMonthYear = (myStr) => {
-    if (!myStr) return '';
-    const parts = myStr.split('-');
-    if (parts.length === 2) {
-      const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-      const monthIndex = parseInt(parts[1], 10) - 1;
-      if (monthIndex >= 0 && monthIndex < 12) {
-        return `${monthNames[monthIndex]} ${parts[0]}`;
-      }
-    }
-    return myStr;
   };
 
   const availableYears = [...new Set(payslipHistory.map(p => {
@@ -142,25 +127,21 @@ export default function EmployeeDetail() {
       alert("No payslips match the current filters.");
       return;
     }
+    const tab = viewOnly ? openPdfTab() : null;
     setBulkPdfLoading(true);
     try {
       const payslipIds = filteredPayslips.map(p => p.id).join(',');
       const res = await exportAPI.employeeBulkPayslipsPDF({ employee_id: id, payslip_ids: payslipIds });
-      const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }));
+      const file = new Blob([res.data], { type: 'application/pdf' });
       if (viewOnly) {
-        window.open(url, '_blank');
+        tab.show(file);
       } else {
-        const link = document.createElement('a');
-        link.href = url;
-        const safeName = employee.name.replace(/ /g, '_');
-        link.setAttribute('download', `Payslips_${safeName}.pdf`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
+        saveBlob(file, `Payslips_${safeFilename(employee.name, 'Employee')}.pdf`);
       }
     } catch (err) {
       console.error("Employee Bulk PDF failed:", err);
-      alert("Failed to generate bulk PDF for this employee.");
+      tab?.close();
+      alert(await getErrorMessage(err, "Failed to generate bulk PDF for this employee."));
     } finally {
       setBulkPdfLoading(false);
     }
