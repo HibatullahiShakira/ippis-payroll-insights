@@ -45,6 +45,11 @@ def create_app(config_class=Config):
     def not_found(error):
         return jsonify({"error": "Resource not found"}), 404
 
+    @app.errorhandler(413)
+    def too_large(error):
+        limit_mb = app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024)
+        return jsonify({"error": f"The upload is too large. The limit is {limit_mb}MB for both files together."}), 413
+
     @app.errorhandler(422)
     def unprocessable(error):
         return jsonify({"error": "Unprocessable request"}), 422

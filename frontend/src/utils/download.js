@@ -8,7 +8,10 @@
  */
 export async function getErrorMessage(err, fallback) {
   if (!err?.response) {
-    return 'Could not reach the server. It may be waking up or the request took too long — please try again.';
+    return 'Could not reach the server. It may be waking up, the connection dropped, or the request took too long — please try again.';
+  }
+  if (err.response.status === 502 || err.response.status === 503 || err.response.status === 504) {
+    return `The server stopped responding while handling this request (error ${err.response.status}). It may have restarted or run out of memory — please try again in a minute.`;
   }
   const data = err.response.data;
   try {

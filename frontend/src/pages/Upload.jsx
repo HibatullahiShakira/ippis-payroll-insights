@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { FiUploadCloud, FiFile, FiCheckCircle, FiAlertCircle } from 'react-icons/fi';
 import { uploadAPI } from '../api/client';
-import { formatMonthYear } from '../utils/download';
+import { formatMonthYear, getErrorMessage } from '../utils/download';
 
 export default function Upload() {
   const [excelFile, setExcelFile] = useState(null);
@@ -103,7 +103,9 @@ export default function Upload() {
       if (pdfInputRef.current) pdfInputRef.current.value = '';
       
     } catch (err) {
-      setStatus({ type: 'error', message: err.response?.data?.error || 'Upload failed' });
+      console.error("Upload failed:", err);
+      const fallback = `Upload failed (the server answered with error ${err.response?.status}). Please try again.`;
+      setStatus({ type: 'error', message: await getErrorMessage(err, fallback) });
       setUploading(false);
     }
   };
