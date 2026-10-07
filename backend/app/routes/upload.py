@@ -1,7 +1,10 @@
 """Upload routes — handle Excel + PDF file upload and trigger parsing."""
 
 import os
+import shutil
+import tempfile
 import threading
+from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from werkzeug.utils import secure_filename
@@ -12,7 +15,7 @@ from ..models.payslip import Payslip
 from ..models.payslip_earning import PayslipEarning
 from ..models.payslip_deduction import PayslipDeduction
 from ..services.excel_parser import parse_excel
-from ..services.pdf_parser import parse_pdf
+from ..services.pdf_parser import parse_pdf, detect_month_year
 from ..services.pdf_export import STORAGE_BUCKET, storage_object_path
 from ..utils import admin_required, is_valid_month_year
 
@@ -31,13 +34,14 @@ def allowed_file(filename, allowed_extensions):
 @upload_bp.route("/upload", methods=["POST"])
 @jwt_required()
 def upload_files():
-    """Upload Excel and/or PDF payslip files for a given month."""
+    """Upload Excel and/or PDF payslip files; the month is read from the payslip PDF."""
     user_id = get_jwt_identity()
+    # Optional: the month is normally read from the payslip PDF itself
     month_year = request.form.get("month_year", "").strip()
 
     # month_year becomes a folder name, so it must be strictly validated
-    if not is_valid_month_year(month_year):
-        return jsonify({"error": "'month_year' is required in YYYY-MM format (e.g., '2026-04')"}), 400
+    if month_year and not is_valid_month_year(month_year):
+        return jsonify({"error": "'month_year' must be in YYYY-MM format (e.g., '2026-04')"}), 400
 
     excel_file = request.files.get("excel_file")
     pdf_file = request.files.get("pdf_file")
@@ -53,32 +57,53 @@ def upload_files():
     if has_pdf and not allowed_file(pdf_file.filename, ALLOWED_PDF):
         return jsonify({"error": "PDF file must be .pdf"}), 400
 
-    # Create upload directory for this batch
-    upload_dir = os.path.join(current_app.config["UPLOAD_FOLDER"], month_year)
-    os.makedirs(upload_dir, exist_ok=True)
+    # Files land in a staging folder first: the month folder is only known once the PDF is read
+    staging_dir = tempfile.mkdtemp(prefix="incoming_", dir=current_app.config["UPLOAD_FOLDER"])
+    try:
+        excel_filename = pdf_filename = None
+        if has_excel:
+            excel_filename = secure_filename(excel_file.filename) or "nominal_roll.xlsx"
+            excel_file.save(os.path.join(staging_dir, excel_filename))
+
+        if has_pdf:
+            pdf_filename = secure_filename(pdf_file.filename) or "payslips.pdf"
+            staged_pdf = os.path.join(staging_dir, pdf_filename)
+            pdf_file.save(staged_pdf)
+            try:
+                # The month printed on the payslips wins over anything sent by the client
+                month_year = detect_month_year(staged_pdf) or month_year
+            except Exception:
+                return jsonify({"error": "The PDF file could not be read. Please check it is a valid payslip PDF."}), 400
+            if not month_year:
+                return jsonify({
+                    "error": "Could not find the payroll month and year on the payslips in this PDF."
+                }), 400
+        elif not month_year:
+            # A nominal roll on its own carries no month; file it under the current one
+            month_year = datetime.now(timezone.utc).strftime("%Y-%m")
+
+        # Create upload directory for this batch
+        upload_dir = os.path.join(current_app.config["UPLOAD_FOLDER"], month_year)
+        os.makedirs(upload_dir, exist_ok=True)
+
+        excel_path = pdf_path = None
+        if excel_filename:
+            excel_path = os.path.join(upload_dir, excel_filename)
+            os.replace(os.path.join(staging_dir, excel_filename), excel_path)
+        if pdf_filename:
+            pdf_path = os.path.join(upload_dir, pdf_filename)
+            os.replace(os.path.join(staging_dir, pdf_filename), pdf_path)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
     # Create batch record
     batch = UploadBatch(
         month_year=month_year,
+        excel_filename=excel_filename,
+        pdf_filename=pdf_filename,
         uploaded_by=int(user_id),
         status="processing",
     )
-
-    # Save Excel file
-    excel_path = None
-    if has_excel:
-        excel_filename = secure_filename(excel_file.filename) or "nominal_roll.xlsx"
-        excel_path = os.path.join(upload_dir, excel_filename)
-        excel_file.save(excel_path)
-        batch.excel_filename = excel_filename
-
-    # Save PDF file
-    pdf_path = None
-    if has_pdf:
-        pdf_filename = secure_filename(pdf_file.filename) or "payslips.pdf"
-        pdf_path = os.path.join(upload_dir, pdf_filename)
-        pdf_file.save(pdf_path)
-        batch.pdf_filename = pdf_filename
 
 
     db.session.add(batch)

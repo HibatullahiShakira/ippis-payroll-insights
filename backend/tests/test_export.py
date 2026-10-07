@@ -193,6 +193,64 @@ def test_employee_list_and_csv_share_filters(client, auth_headers, payroll):
     assert res.status_code == 200
 
 
+def _payslip_pdf_bytes(*lines):
+    doc = fitz.open()
+    page = doc.new_page()
+    for i, line in enumerate(lines):
+        page.insert_text((72, 72 + 20 * i), line)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+@pytest.fixture
+def upload_env(app, tmp_path, monkeypatch):
+    """Uploads go to a temp folder and the background parsing step is skipped."""
+    app.config["UPLOAD_FOLDER"] = str(tmp_path)
+    monkeypatch.setattr("app.routes.upload._process_upload", lambda *args: None)
+    return tmp_path
+
+
+def test_upload_reads_month_from_pdf(client, auth_headers, upload_env):
+    """No month is sent: it is taken from the text of the payslips."""
+    pdf = _payslip_pdf_bytes("Payslip for August 2026", "IPPIS Number: 641215")
+    res = client.post(
+        "/api/upload",
+        data={"pdf_file": (io.BytesIO(pdf), "AJAOKUTA payslips.pdf")},
+        headers=auth_headers,
+        content_type="multipart/form-data",
+    )
+    assert res.status_code == 202
+    batch = res.get_json()["batch"]
+    assert batch["month_year"] == "2026-08"
+    assert os.listdir(upload_env) == ["2026-08"]
+    assert os.listdir(upload_env / "2026-08") == [batch["pdf_filename"]]
+
+
+def test_upload_pdf_month_overrides_client_value(client, auth_headers, upload_env):
+    pdf = _payslip_pdf_bytes("Payslip for August 2026", "IPPIS Number: 641215")
+    res = client.post(
+        "/api/upload",
+        data={"month_year": "2026-07", "pdf_file": (io.BytesIO(pdf), "p.pdf")},
+        headers=auth_headers,
+        content_type="multipart/form-data",
+    )
+    assert res.get_json()["batch"]["month_year"] == "2026-08"
+
+
+def test_upload_rejects_pdf_without_month(client, auth_headers, upload_env):
+    for content in (_payslip_pdf_bytes("nothing useful here"), b"this is not a pdf"):
+        res = client.post(
+            "/api/upload",
+            data={"pdf_file": (io.BytesIO(content), "p.pdf")},
+            headers=auth_headers,
+            content_type="multipart/form-data",
+        )
+        assert res.status_code == 400
+    # Nothing is left behind from the rejected uploads
+    assert os.listdir(upload_env) == []
+
+
 def test_upload_rejects_bad_month(client, auth_headers):
     res = client.post(
         "/api/upload",

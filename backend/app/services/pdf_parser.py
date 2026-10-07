@@ -29,6 +29,23 @@ from ..models.payslip_deduction import PayslipDeduction
 from ..models.upload_batch import UploadBatch
 
 
+def detect_month_year(filepath, max_pages=5):
+    """
+    Read the payroll month (e.g. '2026-04') printed on the payslips in a bulk PDF.
+
+    Returns None if the first few pages carry no recognisable month.
+    Raises if the file cannot be opened as a PDF.
+    """
+    import fitz  # PyMuPDF
+
+    with fitz.open(filepath) as doc:
+        for page_num in range(min(doc.page_count, max_pages)):
+            data = _parse_page_text(doc.load_page(page_num).get_text("text"))
+            if data and data.get("extracted_month_year"):
+                return data["extracted_month_year"]
+    return None
+
+
 def parse_pdf(filepath, batch_id, month_year):
     """
     Parse the bulk payslip PDF file and create Payslip records.

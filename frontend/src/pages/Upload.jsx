@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
 import { FiUploadCloud, FiFile, FiCheckCircle, FiAlertCircle } from 'react-icons/fi';
 import { uploadAPI } from '../api/client';
+import { formatMonthYear } from '../utils/download';
 
 export default function Upload() {
-  const [monthYear, setMonthYear] = useState('');
   const [excelFile, setExcelFile] = useState(null);
   const [pdfFile, setPdfFile] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -14,12 +14,7 @@ export default function Upload() {
   const excelInputRef = useRef(null);
   const pdfInputRef = useRef(null);
 
-  // Auto-set current month (e.g., "2026-04")
   useEffect(() => {
-    const now = new Date();
-    const current = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    setMonthYear(current);
-    
     // Check if there is an active upload to resume tracking
     uploadAPI.list().then(res => {
       if (res.data && res.data.uploads && res.data.uploads.length > 0) {
@@ -42,7 +37,11 @@ export default function Upload() {
         const batch = res.data.batch;
         
         if (batch.status === 'completed') {
-          setStatus({ type: 'success', message: `Successfully processed ${batch.total_records} records!` });
+          setStatus({
+            type: 'success',
+            message: `Successfully processed ${batch.total_records} records for ${formatMonthYear(batch.month_year)}!`
+              + (batch.error_message ? ` Note: ${batch.error_message}` : '')
+          });
           setCurrentBatchId(null);
           setUploading(false);
         } else if (batch.status === 'failed') {
@@ -74,10 +73,6 @@ export default function Upload() {
   };
 
   const handleUpload = async () => {
-    if (!monthYear) {
-      setStatus({ type: 'error', message: 'Please select a month and year.' });
-      return;
-    }
     if (!excelFile && !pdfFile) {
       setStatus({ type: 'error', message: 'Please select at least one file to upload.' });
       return;
@@ -88,7 +83,6 @@ export default function Upload() {
     setProgress(0);
 
     const formData = new FormData();
-    formData.append('month_year', monthYear);
     if (excelFile) formData.append('excel_file', excelFile);
     if (pdfFile) formData.append('pdf_file', pdfFile);
 
@@ -99,7 +93,7 @@ export default function Upload() {
       });
       
       // Upload finished, now backend is processing
-      setStatus({ type: 'info', message: 'Upload complete. Processing files in background...' });
+      setStatus({ type: 'info', message: `Upload complete — detected ${formatMonthYear(res.data.batch.month_year)}. Processing files in background...` });
       setCurrentBatchId(res.data.batch.id);
       
       // Clear files
@@ -144,16 +138,9 @@ export default function Upload() {
         </div>
       )}
 
-      <div className="form-group" style={{ marginBottom: '24px' }}>
-        <label className="form-label">Month & Year</label>
-        <input 
-          type="month" 
-          className="form-input" 
-          value={monthYear}
-          onChange={(e) => setMonthYear(e.target.value)}
-          disabled={uploading}
-        />
-      </div>
+      <p style={{ marginBottom: '24px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+        The payroll month and year are read automatically from the payslip PDF.
+      </p>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '24px' }}>
         {/* Excel Upload */}
