@@ -184,3 +184,63 @@ def test_stale_upload_is_marked_failed(client, auth_headers, env, db_session):
     res = client.get(f"/api/uploads/{batch.id}/status", headers=auth_headers).get_json()
     assert res["batch"]["status"] == "failed"
     assert "restarted" in res["batch"]["error_message"]
+
+
+def _imported_month(client, headers, env, pdf, filed_under=None):
+    """Upload and confirm a PDF, optionally pretending it was filed under another month (older uploads)."""
+    status = upload(client, headers, pdf=pdf)
+    batch_id = status["batch"]["id"]
+    client.post(f"/api/uploads/{batch_id}/confirm", headers=headers)
+    batch = db.session.get(UploadBatch, batch_id)
+    if filed_under:
+        os.rename(env / batch.month_year, env / filed_under)
+        batch.month_year = filed_under
+        db.session.commit()
+    return batch
+
+
+def test_reprocess_reads_stored_pdf_again_after_review(client, auth_headers, env):
+    original = _imported_month(client, auth_headers, env, make_pdf(payslip_lines(1001, "ADA, Mrs. OBI")))
+    payslip = Payslip.query.one()
+    # Simulate data imported by an older parser: no breakdown saved
+    for item in list(payslip.earnings) + list(payslip.deductions):
+        db.session.delete(item)
+    db.session.commit()
+
+    res = client.post(f"/api/uploads/{original.id}/reprocess", headers=auth_headers)
+    assert res.status_code == 202
+    new_id = res.get_json()["batch"]["id"]
+    status = client.get(f"/api/uploads/{new_id}/status", headers=auth_headers).get_json()
+    assert status["batch"]["status"] == "awaiting_review"
+    assert status["report"]["pdf"]["payslips"] == 1
+    assert any("will be replaced" in c["message"] for c in status["report"]["checks"])
+    # Nothing changes until confirmed
+    db.session.expire_all()
+    assert Payslip.query.one().earnings == []
+
+    client.post(f"/api/uploads/{new_id}/confirm", headers=auth_headers)
+    db.session.expire_all()
+    payslip = Payslip.query.one()
+    assert [e.earning_type for e in payslip.earnings] == ["Basic Salary"]
+    assert [d.deduction_type for d in payslip.deductions] == ["Pension"]
+
+
+def test_reprocess_uses_the_month_printed_on_the_payslips(client, auth_headers, env):
+    """An old upload filed under the wrong month is re-read under the right one."""
+    original = _imported_month(client, auth_headers, env, make_pdf(payslip_lines(1001, "ADA, Mrs. OBI")),
+                               filed_under="2026-07")
+    res = client.post(f"/api/uploads/{original.id}/reprocess", headers=auth_headers)
+    assert res.get_json()["batch"]["month_year"] == "2026-09"
+
+
+def test_reprocess_needs_the_stored_pdf(client, auth_headers, env):
+    original = _imported_month(client, auth_headers, env, make_pdf(payslip_lines(1001, "ADA, Mrs. OBI")))
+    os.remove(env / "2026-09" / "sept.pdf")
+    res = client.post(f"/api/uploads/{original.id}/reprocess", headers=auth_headers)
+    assert res.status_code == 404
+    assert "no longer stored" in res.get_json()["error"]
+
+    # Uploads that never completed cannot be re-processed
+    pending = upload(client, auth_headers, pdf=make_pdf(payslip_lines(1002, "BELLO, Mr. SANI")))
+    res = client.post(f"/api/uploads/{pending['batch']['id']}/reprocess", headers=auth_headers)
+    assert res.status_code == 409

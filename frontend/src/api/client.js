@@ -70,6 +70,7 @@ export const uploadAPI = {
   status: (id) => api.get(`/uploads/${id}/status`),
   confirm: (id) => api.post(`/uploads/${id}/confirm`),
   cancel: (id) => api.post(`/uploads/${id}/cancel`),
+  reprocess: (id) => api.post(`/uploads/${id}/reprocess`),
 };
 
 // ── Analytics ──

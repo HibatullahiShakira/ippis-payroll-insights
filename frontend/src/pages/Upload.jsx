@@ -13,6 +13,7 @@ export default function Upload() {
   // { batch, report } while an upload waits for the user to confirm or cancel it
   const [review, setReview] = useState(null);
   const [reviewBusy, setReviewBusy] = useState(false);
+  const [history, setHistory] = useState([]);
 
   const excelInputRef = useRef(null);
   const pdfInputRef = useRef(null);
@@ -29,6 +30,31 @@ export default function Upload() {
       }
     }).catch(console.error);
   }, []);
+
+  // Refresh the history whenever an upload starts, waits for review or finishes
+  useEffect(() => {
+    uploadAPI.list()
+      .then(res => setHistory(res.data.uploads || []))
+      .catch(err => console.error("Failed to load upload history", err));
+  }, [currentBatchId, review]);
+
+  const handleReprocess = async (upload) => {
+    const ok = window.confirm(
+      `Re-read the stored payslip PDF for ${formatMonthYear(upload.month_year)} with the latest reading rules?\n\n`
+      + 'You will see the check results first; nothing changes until you confirm the import.'
+    );
+    if (!ok) return;
+    setUploading(true);
+    setStatus(null);
+    try {
+      const res = await uploadAPI.reprocess(upload.id);
+      setStatus({ type: 'info', message: `Re-reading the ${formatMonthYear(upload.month_year)} payslip PDF...` });
+      setCurrentBatchId(res.data.batch.id);
+    } catch (err) {
+      setStatus({ type: 'error', message: await getErrorMessage(err, 'The upload could not be re-processed.') });
+      setUploading(false);
+    }
+  };
 
   // Poll for status while a batch is being checked or imported
   useEffect(() => {
@@ -157,6 +183,7 @@ export default function Upload() {
   };
 
   return (
+    <>
     <div className="card" style={{ maxWidth: '800px', margin: '0 auto' }}>
       <div className="card-header">
         <h2><FiUploadCloud style={{ marginRight: '8px' }} /> Upload Monthly Payroll Data</h2>
@@ -275,9 +302,81 @@ export default function Upload() {
           disabled={uploading || (!excelFile && !pdfFile)}
           style={{ width: '100%' }}
         >
-          {uploading ? (currentBatchId ? 'Processing Data...' : 'Uploading Files...') : 'Upload and Process'}
+          {review ? 'Waiting for your review above' : uploading ? (currentBatchId ? 'Working...' : 'Uploading Files...') : 'Upload and Check'}
         </button>
       </div>
+    </div>
+
+    <UploadHistory uploads={history} busy={uploading} onReprocess={handleReprocess} />
+    </>
+  );
+}
+
+const STATUS_BADGES = {
+  completed: 'badge-emerald',
+  failed: 'badge-rose',
+  cancelled: 'badge-blue',
+};
+
+function UploadHistory({ uploads, busy, onReprocess }) {
+  const [showAll, setShowAll] = useState(false);
+  if (!uploads.length) return null;
+  const shown = showAll ? uploads : uploads.slice(0, 10);
+
+  return (
+    <div className="card" style={{ maxWidth: '800px', margin: '24px auto 0' }}>
+      <div className="card-header">
+        <h2>Upload History</h2>
+      </div>
+      <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '12px' }}>
+        Re-process reads a stored payslip PDF again with the latest reading rules (for example to fill in
+        earnings and deductions on older months). You review the result before anything changes.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Month</th>
+            <th>Files</th>
+            <th>Status</th>
+            <th>Records</th>
+            <th>Uploaded</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {shown.map(u => (
+            <tr key={u.id} style={{ cursor: 'default' }}>
+              <td style={{ whiteSpace: 'nowrap' }}>{formatMonthYear(u.month_year)}</td>
+              <td style={{ fontSize: '0.75rem', maxWidth: '220px', overflowWrap: 'anywhere' }}>
+                {[u.pdf_filename, u.excel_filename].filter(Boolean).join(', ')}
+              </td>
+              <td>
+                <span className={`badge ${STATUS_BADGES[u.status] || 'badge-amber'}`} title={u.error_message || ''}>
+                  {u.status.replace('_', ' ')}
+                </span>
+              </td>
+              <td>{u.status === 'completed' ? u.total_records?.toLocaleString() : '—'}</td>
+              <td style={{ fontSize: '0.75rem', whiteSpace: 'nowrap' }}>
+                {u.uploaded_at ? new Date(u.uploaded_at).toLocaleDateString() : ''}
+              </td>
+              <td style={{ textAlign: 'right' }}>
+                {u.status === 'completed' && u.pdf_filename && (
+                  <button className="btn btn-sm btn-secondary" disabled={busy} onClick={() => onReprocess(u)}>
+                    Re-process
+                  </button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {uploads.length > 10 && (
+        <div style={{ textAlign: 'center', marginTop: '12px' }}>
+          <button className="btn btn-sm btn-ghost" onClick={() => setShowAll(prev => !prev)}>
+            {showAll ? 'Show fewer' : `Show all ${uploads.length} uploads`}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

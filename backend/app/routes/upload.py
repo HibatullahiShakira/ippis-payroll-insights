@@ -28,7 +28,7 @@ from ..models.payslip_earning import PayslipEarning
 from ..models.payslip_deduction import PayslipDeduction
 from ..services.excel_parser import parse_excel
 from ..services.pdf_parser import parse_pdf, detect_month_year
-from ..services.pdf_export import STORAGE_BUCKET, storage_object_path
+from ..services.pdf_export import STORAGE_BUCKET, PdfSources, storage_object_path
 from ..services.upload_review import build_report, load_report, save_report
 from ..utils import admin_required, is_valid_month_year
 
@@ -223,6 +223,54 @@ def confirm_upload(batch_id):
 
     _start_background(_process_upload, batch.id, excel_path, pdf_path, batch.month_year)
     return jsonify({"message": "Import started", "batch": batch.to_dict()}), 202
+
+
+@upload_bp.route("/uploads/<int:batch_id>/reprocess", methods=["POST"])
+@jwt_required()
+def reprocess_upload(batch_id):
+    """
+    Read a previously imported payslip PDF again with the current parser.
+
+    The stored PDF is copied into a new upload and goes through the same review
+    step as a fresh upload, so nothing changes until the user confirms.
+    """
+    source = UploadBatch.query.get_or_404(batch_id)
+    if source.status != "completed" or not source.pdf_filename:
+        return jsonify({"error": "Only a completed upload that included a payslip PDF can be re-processed."}), 409
+
+    batch = None
+    with PdfSources() as sources:
+        source_path = sources.path_for(source.id)
+        if not source_path:
+            return jsonify({
+                "error": "The original PDF for this upload is no longer stored, so it cannot be re-processed. "
+                         "Upload the PDF again instead."
+            }), 404
+
+        # Trust the month printed on the payslips over what the old upload was filed under
+        try:
+            month_year = detect_month_year(source_path) or source.month_year
+        except Exception:
+            return jsonify({"error": "The stored PDF could not be read."}), 422
+
+        batch = UploadBatch(
+            month_year=month_year,
+            pdf_filename=source.pdf_filename,
+            uploaded_by=int(get_jwt_identity()),
+            status="analyzing",
+        )
+        db.session.add(batch)
+        db.session.commit()
+
+        pending = _pending_dir(batch.id)
+        os.makedirs(pending, exist_ok=True)
+        shutil.copyfile(source_path, os.path.join(pending, batch.pdf_filename))
+
+    _start_background(_analyze_upload, batch.id)
+    return jsonify({
+        "message": f"Re-reading the {source.month_year} payslip PDF — review the result before it is imported",
+        "batch": batch.to_dict(),
+    }), 202
 
 
 @upload_bp.route("/uploads/<int:batch_id>/cancel", methods=["POST"])
