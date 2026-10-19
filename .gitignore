@@ -56,3 +56,6 @@ backend/test_env/
 /generate_dept_pdfs.py
 /update_upload.py
 /output/
+
+# Local database backups (personal data, never commit)
+/backups/
