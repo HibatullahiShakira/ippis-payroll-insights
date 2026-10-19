@@ -29,6 +29,10 @@ from ..models.payslip_deduction import PayslipDeduction
 from ..models.upload_batch import UploadBatch
 
 
+class PdfParseError(Exception):
+    """Raised when a payslip PDF yields no usable payslips at all."""
+
+
 def detect_month_year(filepath, max_pages=5):
     """
     Read the payroll month (e.g. '2026-04') printed on the payslips in a bulk PDF.
@@ -59,6 +63,11 @@ def parse_pdf(filepath, batch_id, month_year):
         int: Number of payslips successfully parsed.
     """
     count = 0
+    # Why pages were skipped, so a bad upload can explain itself
+    no_text_pages = 0
+    unrecognised_pages = 0
+    failed_pages = 0
+    first_error = None
 
     import fitz  # PyMuPDF
 
@@ -96,12 +105,14 @@ def parse_pdf(filepath, batch_id, month_year):
                 text = page.get_text("text")
                 page = None # Free page object from memory early
                 
-                if not text:
+                if not text or not text.strip():
+                    no_text_pages += 1
                     nested.rollback()
                     continue
 
                 payslip_data = _parse_page_text(text)
                 if not payslip_data or not payslip_data.get("ippis_number"):
+                    unrecognised_pages += 1
                     nested.rollback()
                     continue
 
@@ -225,6 +236,9 @@ def parse_pdf(filepath, batch_id, month_year):
             except Exception as e:
                 nested.rollback()  # Rollback only this page on error
                 # Log error but continue processing other pages
+                failed_pages += 1
+                if first_error is None:
+                    first_error = f"page {page_num + 1}: {type(e).__name__}: {e}"
                 print(f"Error parsing page {page_num + 1}: {e}")
                 continue
             finally:
@@ -237,6 +251,20 @@ def parse_pdf(filepath, batch_id, month_year):
     if batch:
         batch.records_processed = count
     db.session.commit()
+
+    if count == 0 and total_pages > 0:
+        reasons = []
+        if failed_pages:
+            reasons.append(f"{failed_pages} page(s) could not be saved (first error, {first_error})")
+        if unrecognised_pages:
+            reasons.append(f"{unrecognised_pages} page(s) had no IPPIS Number in the expected payslip layout")
+        if no_text_pages:
+            reasons.append(
+                f"{no_text_pages} page(s) contain no readable text (the PDF may be a scanned image)"
+            )
+        raise PdfParseError(
+            f"No payslips could be read from the {total_pages}-page PDF: " + "; ".join(reasons) + "."
+        )
 
     return count
 

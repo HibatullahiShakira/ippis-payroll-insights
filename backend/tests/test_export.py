@@ -259,3 +259,17 @@ def test_upload_rejects_bad_month(client, auth_headers):
         content_type="multipart/form-data",
     )
     assert res.status_code == 400
+
+
+def test_pdf_with_no_readable_payslips_fails_with_reason(app, db_session, tmp_path):
+    """A PDF that yields no payslips must fail loudly instead of 'completing' with 0 records."""
+    from app.services.pdf_parser import PdfParseError, parse_pdf
+
+    path = tmp_path / "september.pdf"
+    path.write_bytes(_payslip_pdf_bytes("EMPLOYEE PAYSLIP", "SEPTEMBER 2026", "no ippis here"))
+    batch = UploadBatch(month_year="2026-09", pdf_filename="september.pdf", status="processing")
+    db_session.add(batch)
+    db_session.commit()
+
+    with pytest.raises(PdfParseError, match="1 page\(s\) had no IPPIS Number"):
+        parse_pdf(str(path), batch.id, "2026-09")
