@@ -133,234 +133,69 @@ def analyze_pdf(filepath):
                 result["net_mismatch"] += 1
                 example(page_num, data, f"Gross {gross:,} - Deductions {deductions:,} does not equal Net {net:,}")
 
-            itemised_ok = True
-            for key, total in (("earnings", gross), ("deductions", deductions)):
-                if total is not None and abs(sum(i["amount"] for i in data[key]) - total) > MONEY_TOLERANCE:
-                    itemised_ok = False
-            if itemised_ok:
-                result["fully_itemised"] += 1
-            else:
+            if data.get("itemised_incomplete"):
                 result["itemised_mismatch"] += 1
+                example(page_num, data, "IPPIS cut the " + " and ".join(data["itemised_incomplete"])
+                        + " list short; the rest is saved as 'Not itemised on payslip'")
+            else:
+                result["fully_itemised"] += 1
 
     return result
 
 
-def parse_pdf(filepath, batch_id, month_year):
+def parse_pdf(filepath, batch_id, month_year, progress_offset=0):
     """
     Parse the bulk payslip PDF file and create Payslip records.
+
+    Every page is read first (no database work), then the payslips are saved in
+    batches, with progress recorded on the upload batch after each one.
 
     Args:
         filepath: Path to the PDF file.
         batch_id: The UploadBatch ID to associate payslips with.
-        month_year: The month string (e.g., '2026-04').
+        month_year: The month string (e.g., '2026-04'); the month printed on the
+            payslips takes precedence.
+        progress_offset: Records already done by an earlier step of the same
+            upload (the nominal roll), so the progress bar keeps counting up.
 
     Returns:
-        int: Number of payslips successfully parsed.
+        int: Number of payslips saved.
     """
-    count = 0
+    from .import_writer import Progress, save_payslips
+
     # Why pages were skipped, so a bad upload can explain itself
     no_text_pages = 0
     unrecognised_pages = 0
-    failed_pages = 0
-    first_error = None
+    payslips = []
 
     import fitz  # PyMuPDF
 
     with fitz.open(filepath) as doc:
         total_pages = doc.page_count
-        
-        batch = UploadBatch.query.get(batch_id)
-        if batch:
-            batch.total_records = total_pages
-
-        # Peek at the first page to extract the actual month/year from the PDF text
-        try:
-            if total_pages > 0:
-                first_page_text = doc.load_page(0).get_text("text")
-                first_page_data = _parse_page_text(first_page_text)
-                if first_page_data and first_page_data.get("extracted_month_year"):
-                    month_year = first_page_data["extracted_month_year"]
-        except Exception as e:
-            print(f"Could not extract month/year from first page: {e}")
-
-        # PERFORMANCE OPTIMIZATION: Pre-load DB records into memory dictionaries. 
-        # By loading ONLY the IDs and not the full SQLAlchemy objects, we save hundreds of MB of RAM!
-        employees_data = db.session.query(
-            Employee.ippis_number, Employee.id, Employee.department, Employee.division
-        ).all()
-        employee_id_by_ippis = {ippis: emp_id for ippis, emp_id, _, _ in employees_data}
-        # Department/division on record at import time, frozen onto this month's payslips
-        placement_by_id = {emp_id: (dept, div) for _, emp_id, dept, div in employees_data}
-        
-        payslips_data = db.session.query(Payslip.employee_id, Payslip.id).filter_by(month_year=month_year).all()
-        payslip_id_by_emp_id = {emp_id: p_id for emp_id, p_id in payslips_data}
-
         for page_num in range(total_pages):
-            try:
-                # Create a savepoint for this specific page
-                nested = db.session.begin_nested()
-                page = doc.load_page(page_num)
-                # get_text("text") mimics pdfplumber's reading order output almost perfectly
-                text = page.get_text("text")
-                page = None # Free page object from memory early
-                
-                if not text or not text.strip():
-                    no_text_pages += 1
-                    nested.rollback()
-                    continue
-
-                payslip_data = _parse_page_text(text)
-                if not payslip_data or not payslip_data.get("ippis_number"):
-                    unrecognised_pages += 1
-                    nested.rollback()
-                    continue
-
-                payslip_data["pdf_page_num"] = page_num
-
-                # Find the employee by IPPIS number in memory
-                ippis = payslip_data["ippis_number"]
-                employee_id = employee_id_by_ippis.get(ippis)
-
-                # Employee.gl holds just the level ('GL14_CONPSS' -> '14'); the full grade
-                # stays on the payslip. Storing the full string overflowed the 10-char
-                # column, which made PostgreSQL reject every page of the upload.
-                extracted_gl = normalize_gl(payslip_data.get("grade"))
-
-                if not employee_id:
-                    # Create a minimal employee record if not found in Excel
-                    employee = Employee(
-                        ippis_number=ippis,
-                        name=payslip_data.get("name", "Unknown"),
-                        file_no=0,
-                        gl=extracted_gl,
-                    )
-                    db.session.add(employee)
-                    db.session.flush()
-                    employee_id = employee.id
-                    employee_id_by_ippis[ippis] = employee_id
-                else:
-                    # Update existing employee's GL from the latest payslip
-                    if extracted_gl:
-                        emp_obj = db.session.query(Employee).get(employee_id)
-                        if emp_obj:
-                            emp_obj.gl = extracted_gl
-
-                # Check for existing payslip in memory
-                existing_payslip_id = payslip_id_by_emp_id.get(employee_id)
-                if existing_payslip_id:
-                    # Clear out old earnings and deductions so we can insert new ones
-                    db.session.query(PayslipEarning).filter_by(payslip_id=existing_payslip_id).delete(synchronize_session=False)
-                    db.session.query(PayslipDeduction).filter_by(payslip_id=existing_payslip_id).delete(synchronize_session=False)
-                    
-                    # Update existing payslip with new data
-                    payslip = db.session.query(Payslip).get(existing_payslip_id)
-                    payslip.batch_id = batch_id
-                    payslip.grade = payslip_data.get("grade")
-                    payslip.step = payslip_data.get("step")
-                    payslip.gender = payslip_data.get("gender")
-                    payslip.tax_state = payslip_data.get("tax_state")
-                    payslip.designation = payslip_data.get("designation")
-                    payslip.date_of_birth = payslip_data.get("date_of_birth")
-                    payslip.date_of_first_appt = payslip_data.get("date_of_first_appt")
-                    payslip.trade_union = payslip_data.get("trade_union")
-                    payslip.bank_name = payslip_data.get("bank_name")
-                    payslip.account_number = payslip_data.get("account_number")
-                    payslip.pfa_name = payslip_data.get("pfa_name")
-                    payslip.pension_pin = payslip_data.get("pension_pin")
-                    payslip.total_gross_earnings = payslip_data.get("total_gross_earnings")
-                    payslip.total_gross_deductions = payslip_data.get("total_gross_deductions")
-                    payslip.total_net_earnings = payslip_data.get("total_net_earnings")
-                    payslip.cumulative_tax = payslip_data.get("cumulative_tax")
-                    payslip.cumulative_income = payslip_data.get("cumulative_income")
-                    payslip.cumulative_pension = payslip_data.get("cumulative_pension")
-                    payslip.cumulative_nhf = payslip_data.get("cumulative_nhf")
-                    payslip.pdf_page_num = page_num
-                    payslip.department, payslip.division = placement_by_id.get(employee_id, (None, None))
-                    payslip.gl = extracted_gl
-                    target_payslip = payslip
-                else:
-                    # Create new payslip
-                    payslip = Payslip(
-                        employee_id=employee_id,
-                        batch_id=batch_id,
-                        month_year=month_year,
-                        grade=payslip_data.get("grade"),
-                        step=payslip_data.get("step"),
-                        gender=payslip_data.get("gender"),
-                        tax_state=payslip_data.get("tax_state"),
-                        designation=payslip_data.get("designation"),
-                        date_of_birth=payslip_data.get("date_of_birth"),
-                        date_of_first_appt=payslip_data.get("date_of_first_appt"),
-                        trade_union=payslip_data.get("trade_union"),
-                        bank_name=payslip_data.get("bank_name"),
-                        account_number=payslip_data.get("account_number"),
-                        pfa_name=payslip_data.get("pfa_name"),
-                        pension_pin=payslip_data.get("pension_pin"),
-                        total_gross_earnings=payslip_data.get("total_gross_earnings"),
-                        total_gross_deductions=payslip_data.get("total_gross_deductions"),
-                        total_net_earnings=payslip_data.get("total_net_earnings"),
-                        cumulative_tax=payslip_data.get("cumulative_tax"),
-                        cumulative_income=payslip_data.get("cumulative_income"),
-                        cumulative_pension=payslip_data.get("cumulative_pension"),
-                        cumulative_nhf=payslip_data.get("cumulative_nhf"),
-                        pdf_page_num=page_num,
-                        department=placement_by_id.get(employee_id, (None, None))[0],
-                        division=placement_by_id.get(employee_id, (None, None))[1],
-                        gl=extracted_gl,
-                    )
-                    db.session.add(payslip)
-                    db.session.flush()
-                    payslip_id_by_emp_id[employee_id] = payslip.id
-                    target_payslip = payslip
-
-                # Add earnings
-                for earning in payslip_data.get("earnings", []):
-                    db.session.add(PayslipEarning(
-                        payslip_id=target_payslip.id,
-                        earning_type=earning["type"],
-                        amount=earning["amount"],
-                    ))
-
-                # Add deductions
-                for deduction in payslip_data.get("deductions", []):
-                    db.session.add(PayslipDeduction(
-                        payslip_id=target_payslip.id,
-                        deduction_type=deduction["type"],
-                        amount=deduction["amount"],
-                    ))
-
-                count += 1
-                nested.commit()  # Release savepoint on success
-
-                # Batch commit and update progress
-                if count % 50 == 0:
-                    if batch:
-                        batch.records_processed = count
-                    db.session.commit()
-
-            except Exception as e:
-                nested.rollback()  # Rollback only this page on error
-                # Log error but continue processing other pages
-                failed_pages += 1
-                if first_error is None:
-                    first_error = f"page {page_num + 1}: {type(e).__name__}: {e}"
-                print(f"Error parsing page {page_num + 1}: {e}")
+            text = doc.load_page(page_num).get_text("text")
+            if not text or not text.strip():
+                no_text_pages += 1
                 continue
-            finally:
-                # Force garbage collection every 50 pages to ensure PyPDF2 and pdfplumber objects are freed
-                if count > 0 and count % 50 == 0:
-                    import gc
-                    gc.collect()
+            data = _parse_page_text(text)
+            if not data or not data.get("ippis_number"):
+                unrecognised_pages += 1
+                continue
+            data["pdf_page_num"] = page_num
+            payslips.append(data)
 
-    # Final commit
-    if batch:
-        batch.records_processed = count
-    db.session.commit()
+    # The month printed on the payslips wins
+    if payslips and payslips[0].get("extracted_month_year"):
+        month_year = payslips[0]["extracted_month_year"]
+
+    count, failed_pages, first_error = save_payslips(
+        payslips, month_year, batch_id, progress=Progress(batch_id, progress_offset)
+    )
 
     if count == 0 and total_pages > 0:
         reasons = []
         if failed_pages:
-            reasons.append(f"{failed_pages} page(s) could not be saved (first error, {first_error})")
+            reasons.append(f"{failed_pages} payslip(s) could not be saved (first error, {first_error})")
         if unrecognised_pages:
             reasons.append(f"{unrecognised_pages} page(s) had no IPPIS Number in the expected payslip layout")
         if no_text_pages:
@@ -370,6 +205,8 @@ def parse_pdf(filepath, batch_id, month_year):
         raise PdfParseError(
             f"No payslips could be read from the {total_pages}-page PDF: " + "; ".join(reasons) + "."
         )
+    if failed_pages:
+        print(f"{failed_pages} payslip(s) could not be saved; first error: {first_error}")
 
     return count
 
@@ -537,7 +374,30 @@ def _parse_page_text(text):
     else:
         labelled = _typed_labelled_fields(text)
     data.update(labelled)
+    _account_for_unlisted_items(data)
     return data
+
+
+NOT_ITEMISED = "Not itemised on payslip"
+
+
+def _account_for_unlisted_items(data):
+    """
+    IPPIS cuts very long earnings/deductions lists off at the bottom of the page
+    and never prints the rest (the following page is blank apart from the
+    letterhead), so the listed items fall short of the printed total. The gap is
+    saved as one clearly named line, so every breakdown adds up to its printed
+    total and the payslip is marked as not fully itemised.
+    """
+    data["itemised_incomplete"] = []
+    for key, total_key in (("earnings", "total_gross_earnings"), ("deductions", "total_gross_deductions")):
+        total = data.get(total_key)
+        if total is None:
+            continue
+        gap = total - sum(item["amount"] for item in data.get(key, []))
+        if gap > MONEY_TOLERANCE:
+            data.setdefault(key, []).append({"type": NOT_ITEMISED, "amount": gap})
+            data["itemised_incomplete"].append(key)
 
 
 def _parse_page_text_patterns(text, require_ippis=True):
@@ -753,20 +613,21 @@ def _parse_line_items(text):
         if description and amount is not None and not description.lower().startswith("total"):
             items.append({"type": description, "amount": amount})
 
-    for line in text.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    for i, line in enumerate(lines):
         if AMOUNT_ONLY_RE.match(line):
             if pending:
                 add(" ".join(pending), line)
                 pending = []
             continue
 
+        # When the next line is an amount on its own, this whole line is the name,
+        # even if it ends in a number ("Conhess Shift Allowance 1" / "22,046.00").
+        next_is_amount = i + 1 < len(lines) and AMOUNT_ONLY_RE.match(lines[i + 1])
+
         # Match: description followed by amount (with optional commas and decimal)
         match = re.match(r"(.+?)\s+([\d,]+\.?\d*)$", line)
-        if match and not pending:
+        if match and not pending and not next_is_amount:
             add(match.group(1).strip(), match.group(2))
         else:
             pending.append(line)

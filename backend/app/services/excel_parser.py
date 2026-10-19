@@ -3,9 +3,6 @@
 import re
 
 import openpyxl
-from ..extensions import db
-from ..models.employee import Employee
-from ..models.employee_history import EmployeeHistory
 from ..utils import normalize_gl
 
 REQUIRED_FIELDS = ("ippis_number", "name")
@@ -159,68 +156,24 @@ def read_nominal_roll(filepath):
         wb.close()
 
 
-def parse_excel(filepath, batch_id=None):
+def parse_excel(filepath, batch_id=None, progress_offset=0):
     """
     Parse the nominal payroll Excel file and create/update Employee records.
     Dynamically finds the header row to determine column indices.
+
+    Rows are saved in batches with progress recorded on the upload batch.
+    Returns the number of employees saved.
     """
+    from .import_writer import Progress, save_employees
+
     sheet = read_nominal_roll(filepath)
     if sheet["header_row"] is None:
         raise ValueError("No header row with an IPPIS Number column was found in the Excel sheet.")
-    col_map = sheet["col_map"]
 
-    count = 0
-    for record in sheet["records"]:
-        gl_str = record["gl"]
-        department_str = record["department"]
-        division_str = record["division"]
-
-        # Upsert
-        employee = Employee.query.filter_by(ippis_number=record["ippis_number"]).first()
-        if employee:
-            # A sheet without a GL/department/division column says nothing about it:
-            # keep what is on record instead of wiping it (GL is refilled from payslips)
-            if "gl" not in col_map:
-                gl_str = employee.gl
-            if "department" not in col_map:
-                department_str = employee.department
-            if "division" not in col_map:
-                division_str = employee.division
-
-            if employee.gl != gl_str or employee.department != department_str or employee.division != division_str:
-                db.session.add(EmployeeHistory(
-                    employee_id=employee.id,
-                    batch_id=batch_id,
-                    old_gl=employee.gl,
-                    old_department=employee.department,
-                    old_division=employee.division,
-                    new_gl=gl_str,
-                    new_department=department_str,
-                    new_division=division_str,
-                ))
-
-            employee.name = record["name"]
-            if record["file_no"] is not None:
-                employee.file_no = record["file_no"]
-            employee.gl = gl_str
-            employee.department = department_str
-            employee.division = division_str
-            if record["serial_no"] is not None:
-                employee.serial_no = record["serial_no"]
-        else:
-            db.session.add(Employee(
-                serial_no=record["serial_no"],
-                file_no=record["file_no"] if record["file_no"] is not None else 0,  # Cannot be null
-                ippis_number=record["ippis_number"],
-                name=record["name"],
-                gl=gl_str,
-                department=department_str,
-                division=division_str,
-            ))
-
-        count += 1
-        if count % 200 == 0:
-            db.session.commit()
-
-    db.session.commit()
+    count, failed, first_error = save_employees(
+        sheet["records"], sheet["col_map"], batch_id=batch_id,
+        progress=Progress(batch_id, progress_offset) if batch_id else None,
+    )
+    if failed:
+        print(f"{failed} nominal-roll row(s) could not be saved; first error: {first_error}")
     return count

@@ -14,6 +14,8 @@ export default function Upload() {
   const [review, setReview] = useState(null);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [history, setHistory] = useState([]);
+  // What the server is doing right now: { stage: 'checking'|'importing', monthYear, processed, total, startedAt }
+  const [job, setJob] = useState(null);
 
   const excelInputRef = useRef(null);
   const pdfInputRef = useRef(null);
@@ -48,7 +50,7 @@ export default function Upload() {
     setStatus(null);
     try {
       const res = await uploadAPI.reprocess(upload.id);
-      setStatus({ type: 'info', message: `Re-reading the ${formatMonthYear(upload.month_year)} payslip PDF...` });
+      setJob({ stage: 'checking', monthYear: res.data.batch.month_year, startedAt: res.data.batch.uploaded_at });
       setCurrentBatchId(res.data.batch.id);
     } catch (err) {
       setStatus({ type: 'error', message: await getErrorMessage(err, 'The upload could not be re-processed.') });
@@ -64,13 +66,24 @@ export default function Upload() {
       try {
         const res = await uploadAPI.status(currentBatchId);
         const batch = res.data.batch;
+        const working = { monthYear: batch.month_year, startedAt: batch.uploaded_at };
+
+        if (batch.status === 'analyzing' || batch.status === 'processing') {
+          setStatus(null);
+          setJob({
+            ...working,
+            stage: batch.status === 'analyzing' ? 'checking' : 'importing',
+            processed: batch.records_processed || 0,
+            total: batch.total_records || 0,
+          });
+          return; // keep polling
+        }
+        setJob(null);
 
         if (batch.status === 'awaiting_review') {
           setReview({ batch, report: res.data.report });
           setStatus(null);
           setCurrentBatchId(null);
-        } else if (batch.status === 'analyzing') {
-          setStatus({ type: 'info', message: `Checking the files for ${formatMonthYear(batch.month_year)} before anything is imported...` });
         } else if (batch.status === 'cancelled') {
           setStatus({ type: 'info', message: 'This upload was discarded. Nothing was imported.' });
           setCurrentBatchId(null);
@@ -87,15 +100,7 @@ export default function Upload() {
           setStatus({ type: 'error', message: `Processing failed: ${batch.error_message}` });
           setCurrentBatchId(null);
           setUploading(false);
-        } else if (batch.status === 'processing') {
-          setStatus({
-            type: 'info',
-            message: batch.total_records > 0
-              ? `Importing: ${batch.records_processed} of ${batch.total_records} payslips saved...`
-              : 'Importing the files...'
-          });
         }
-        // Otherwise keep polling
       } catch (err) {
         console.error("Failed to check status", err);
       }
@@ -110,9 +115,11 @@ export default function Upload() {
     setReviewBusy(true);
     try {
       const res = await uploadAPI.confirm(review.batch.id);
+      const batch = res.data.batch;
       setReview(null);
-      setStatus({ type: 'info', message: 'Import started...' });
-      setCurrentBatchId(res.data.batch.id);
+      setStatus(null);
+      setJob({ stage: 'importing', monthYear: batch.month_year, startedAt: batch.uploaded_at, processed: 0, total: batch.total_records || 0 });
+      setCurrentBatchId(batch.id);
     } catch (err) {
       setStatus({ type: 'error', message: await getErrorMessage(err, 'The import could not be started.') });
       setReview(null);
@@ -165,7 +172,7 @@ export default function Upload() {
       });
       
       // Upload finished, now backend is processing
-      setStatus({ type: 'info', message: `Upload complete — detected ${formatMonthYear(res.data.batch.month_year)}. Checking the files before anything is imported...` });
+      setJob({ stage: 'checking', monthYear: res.data.batch.month_year, startedAt: res.data.batch.uploaded_at });
       setCurrentBatchId(res.data.batch.id);
       
       // Clear files
@@ -212,6 +219,11 @@ export default function Upload() {
           <span>{status.message}</span>
         </div>
       )}
+
+      {uploading && !currentBatchId && !review && !job && (
+        <JobProgress job={{ stage: 'uploading', processed: progress, total: 100 }} />
+      )}
+      {job && <JobProgress job={job} />}
 
       {review && (
         <ReviewPanel
@@ -282,18 +294,6 @@ export default function Upload() {
           )}
         </div>
       </div>
-
-      {uploading && (
-        <div className="upload-progress">
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
-            <span>Uploading...</span>
-            <span>{progress}%</span>
-          </div>
-          <div className="progress-bar-container">
-            <div className="progress-bar" style={{ width: `${progress}%` }}></div>
-          </div>
-        </div>
-      )}
 
       <div style={{ marginTop: '32px', textAlign: 'right' }}>
         <button 
@@ -487,6 +487,79 @@ function SummaryTile({ label, value, detail }) {
       <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>{label}</div>
       <div style={{ fontSize: '1.3rem', fontWeight: 700 }}>{value}</div>
       <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{detail}</div>
+    </div>
+  );
+}
+
+const STAGES = {
+  uploading: {
+    title: 'Sending the files to the server',
+    hint: 'Keep this page open until the files have finished sending.',
+  },
+  checking: {
+    title: 'Checking the files',
+    hint: 'Reading every page and checking the figures. Nothing is imported yet. This usually takes under a minute.',
+  },
+  importing: {
+    title: 'Importing',
+    hint: 'You can leave this page; the import carries on on the server and this page picks it up again when you return.',
+  },
+};
+
+// Server times are UTC without a zone marker; read them as UTC
+function parseServerTime(value) {
+  if (!value) return null;
+  const ms = Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(value) ? value : `${value}Z`);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function formatElapsed(ms) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes ? `${minutes} min ${String(seconds % 60).padStart(2, '0')} s` : `${seconds} s`;
+}
+
+function JobProgress({ job }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const stage = STAGES[job.stage];
+  const started = parseServerTime(job.startedAt);
+  const known = job.total > 0 && (job.stage !== 'importing' || job.processed > 0);
+  const percent = known ? Math.min(100, Math.round((job.processed * 100) / job.total)) : null;
+
+  let detail;
+  if (job.stage === 'uploading') {
+    detail = `${job.processed}% sent`;
+  } else if (job.stage === 'importing' && !known) {
+    detail = 'Saving the PDF to storage and preparing the import...';
+  } else if (job.stage === 'importing') {
+    detail = `${job.processed.toLocaleString()} of ${job.total.toLocaleString()} records saved (${percent}%)`;
+  } else {
+    detail = 'Reading pages...';
+  }
+
+  return (
+    <div style={{
+      padding: '16px', marginBottom: '24px', borderRadius: 'var(--radius-md)',
+      background: 'var(--accent-blue-dim)', border: '1px solid rgba(59, 130, 246, 0.2)',
+    }} role="status" aria-live="polite">
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '8px' }}>
+        <strong style={{ color: 'var(--accent-blue)' }}>
+          {stage.title}{job.monthYear ? ` — ${formatMonthYear(job.monthYear)}` : ''}
+        </strong>
+        {started && <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Elapsed {formatElapsed(now - started)}</span>}
+      </div>
+      <div className="progress-bar-container">
+        {percent === null
+          ? <div className="progress-bar indeterminate"></div>
+          : <div className="progress-bar" style={{ width: `${percent}%` }}></div>}
+      </div>
+      <div style={{ fontSize: '0.85rem', marginTop: '8px' }}>{detail}</div>
+      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>{stage.hint}</div>
     </div>
   );
 }

@@ -59,6 +59,7 @@ def test_fields_read_from_real_layouts(name):
 def test_figures_are_consistent(name):
     """Every payslip carries its own answer key: the items add up and Gross - Deductions = Net."""
     data = page(name)
+    assert data["itemised_incomplete"] == []
     gross, deductions, net = (data["total_gross_earnings"], data["total_gross_deductions"],
                               data["total_net_earnings"])
     assert abs(gross - deductions - net) <= Decimal("0.05")
@@ -66,11 +67,32 @@ def test_figures_are_consistent(name):
     assert abs(sum(i["amount"] for i in data["deductions"]) - deductions) <= Decimal("0.05")
 
 
-def test_long_deduction_list_keeps_the_items_on_the_page():
-    """The list runs past the page with no Total line; the visible items are still kept."""
+def test_long_deduction_list_cut_off_by_ippis():
+    """
+    IPPIS stops printing the list at the bottom of the page (no Total line; the
+    next page is blank). The 20 printed items are kept and the unprinted rest is
+    one 'Not itemised on payslip' line, so the breakdown matches the printed total.
+    """
+    from app.services.pdf_parser import NOT_ITEMISED
+
     data = page("2026_09_long_deductions")
-    assert len(data["deductions"]) == 20
-    assert sum(i["amount"] for i in data["deductions"]) < data["total_gross_deductions"]
+    assert len(data["deductions"]) == 21
+    assert data["deductions"][-1] == {"type": NOT_ITEMISED, "amount": Decimal("65154.85")}
+    assert sum(i["amount"] for i in data["deductions"]) == data["total_gross_deductions"]
+    assert data["itemised_incomplete"] == ["deductions"]
+
+
+def test_item_names_ending_in_a_number():
+    """'Conhess Shift Allowance 1' / '22,046.00' is one item, not an allowance of 1 naira."""
+    from app.services.pdf_parser import _parse_line_items
+
+    items = _parse_line_items("\n".join([
+        "Clinical Hazard", "32,000.00", "Conhess Shift Allowance 1", "22,046.00", "Total", "54,046.00",
+    ]))
+    assert items == [
+        {"type": "Clinical Hazard", "amount": Decimal("32000.00")},
+        {"type": "Conhess Shift Allowance 1", "amount": Decimal("22046.00")},
+    ]
 
 
 def test_overflow_page_is_not_a_payslip():

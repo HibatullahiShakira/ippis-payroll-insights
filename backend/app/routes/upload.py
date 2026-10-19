@@ -167,8 +167,9 @@ def _analyze_upload(app, batch_id):
             excel, pdf = _pending_paths(batch, app.config["UPLOAD_FOLDER"])
             report = build_report(batch.month_year, excel_path=excel, pdf_path=pdf)
             save_report(batch_id, report)
+            # Everything the import will save: nominal-roll rows, then payslips
             batch.total_records = (
-                (report.get("pdf") or {}).get("payslips") or (report.get("excel") or {}).get("rows") or 0
+                ((report.get("excel") or {}).get("rows") or 0) + ((report.get("pdf") or {}).get("payslips") or 0)
             )
             batch.status = "awaiting_review"
             db.session.commit()
@@ -332,9 +333,10 @@ def _process_upload(app, batch_id, excel_path, pdf_path, month_year):
                 excel_count = parse_excel(excel_path, batch_id)
                 total += excel_count
 
-            # Parse PDF (creates Payslip records linked to Employees)
+            # Parse PDF (creates Payslip records linked to Employees);
+            # progress keeps counting on from the nominal roll
             if pdf_path:
-                pdf_count = parse_pdf(pdf_path, batch_id, month_year)
+                pdf_count = parse_pdf(pdf_path, batch_id, month_year, progress_offset=total)
                 total += pdf_count
 
             batch.total_records = total

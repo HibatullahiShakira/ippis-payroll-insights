@@ -1239,3 +1239,22 @@ tbody tr:last-child td {
     display: none;
   }
 }
+
+/* Moving bar for steps whose length is not known yet */
+.progress-bar.indeterminate {
+  width: 30%;
+  animation: progress-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(340%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar.indeterminate {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}

@@ -99,8 +99,8 @@ def _review_pdf(pdf_path, month_year, checks):
                                 "Upload one month per PDF."))
 
     if found["overflow_pages"]:
-        checks.append(("info", f"{found['overflow_pages']} continuation page(s) for long payslips were skipped "
-                               "(they carry no payslip of their own)."))
+        checks.append(("info", f"{found['overflow_pages']} blank page(s) carrying only the IPPIS letterhead "
+                               "were skipped."))
     if found["blank_pages"]:
         checks.append(("warning", f"{found['blank_pages']} page(s) have no readable text and were skipped. "
                                   "Scanned pages cannot be read."))
@@ -125,10 +125,10 @@ def _review_pdf(pdf_path, month_year, checks):
     mismatched = found["itemised_mismatch"]
     if mismatched:
         level = "warning" if mismatched / payslips > ITEMISED_MISMATCH_WARN else "info"
-        checks.append((level, f"{mismatched} payslip(s) ({_pct(mismatched, payslips)}) have an itemised "
-                              "earnings/deductions list that does not add up to the printed totals, usually "
-                              "because the list continues on an overflow page. Their totals are still saved "
-                              "correctly."))
+        checks.append((level, f"{mismatched} payslip(s) ({_pct(mismatched, payslips)}) have more "
+                              "earnings/deductions than IPPIS printed: the list is cut off at the bottom of the "
+                              "page and the rest is not in the PDF. The difference is saved as one line, "
+                              "'Not itemised on payslip', so every breakdown still adds up to its printed total."))
 
     # Compare with what is already on record
     existing = Payslip.query.filter_by(month_year=month_year).count()
