@@ -31,6 +31,14 @@ def _enforce_column_limits(session, flush_context, instances):
                 if abs(value) >= limit:
                     raise ValueError(f"numeric overflow for {table.name}.{column.name}: {value!r}")
 
+@pytest.fixture(autouse=True)
+def _fresh_login_throttle():
+    from app.services import login_throttle
+    login_throttle.reset()
+    yield
+    login_throttle.reset()
+
+
 @pytest.fixture
 def app():
     """Create and configure a new app instance for each test."""

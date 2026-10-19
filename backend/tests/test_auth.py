@@ -101,3 +101,57 @@ def test_login_failure(client, db_session):
         "password": "wrongpassword"
     })
     assert response.status_code == 401
+
+
+def test_repeated_failed_logins_are_locked_out(client, db_session):
+    user = User(username="target", email="t@example.com", full_name="Target")
+    user.set_password("right-password")
+    db_session.add(user)
+    db_session.commit()
+
+    for _ in range(5):
+        assert client.post('/api/auth/login', json={"username": "target", "password": "guess"}).status_code == 401
+    # Even the right password is refused while locked out, so guessing cannot find it
+    res = client.post('/api/auth/login', json={"username": "TARGET", "password": "right-password"})
+    assert res.status_code == 429
+    assert "Too many failed login attempts" in res.get_json()["error"]
+    assert int(res.headers["Retry-After"]) > 0
+
+
+def test_successful_login_clears_failures(client, db_session):
+    user = User(username="typo", email="typo@example.com", full_name="Typo")
+    user.set_password("right-password")
+    db_session.add(user)
+    db_session.commit()
+    for _ in range(4):
+        client.post('/api/auth/login', json={"username": "typo", "password": "oops"})
+    assert client.post('/api/auth/login', json={"username": "typo", "password": "right-password"}).status_code == 200
+    for _ in range(4):
+        client.post('/api/auth/login', json={"username": "typo", "password": "oops"})
+    assert client.post('/api/auth/login', json={"username": "typo", "password": "right-password"}).status_code == 200
+
+
+def test_init_db_route_is_admin_only(client, db_session, auth_headers):
+    assert client.post('/api/init-db-tables').status_code == 401
+    assert client.get('/api/init-db-tables').status_code in (404, 405)
+    assert client.post('/api/init-db-tables', headers=auth_headers).status_code == 200
+
+
+def test_production_refuses_public_default_secrets(monkeypatch):
+    from app import create_app
+    from app.config import Config
+
+    monkeypatch.setenv("RENDER", "true")
+
+    class Defaults(Config):
+        SECRET_KEY = "dev-secret-key-change-in-production"
+        JWT_SECRET_KEY = "jwt-secret-change-in-production"
+
+    with pytest.raises(RuntimeError, match="JWT_SECRET_KEY is not set"):
+        create_app(Defaults)
+
+    class Strong(Config):
+        SECRET_KEY = "s" * 64
+        JWT_SECRET_KEY = "j" * 64
+
+    assert create_app(Strong) is not None

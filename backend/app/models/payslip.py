@@ -14,6 +14,12 @@ class Payslip(db.Model):
     month_year = db.Column(db.String(7), nullable=False, index=True)
     pdf_page_num = db.Column(db.Integer, nullable=True)
 
+    # Where the employee was in the organisation in THIS month. Reports for a past
+    # month group by these, so a later transfer or promotion does not rewrite them.
+    department = db.Column(db.String(200), nullable=True, index=True)
+    division = db.Column(db.String(200), nullable=True)
+    gl = db.Column(db.String(10), nullable=True, index=True)
+
     # Employee info from PDF
     grade = db.Column(db.String(50), nullable=True)
     step = db.Column(db.Integer, nullable=True)

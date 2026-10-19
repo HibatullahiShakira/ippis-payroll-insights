@@ -5,6 +5,7 @@ import zipfile
 import fitz
 import pytest
 
+from app.extensions import db
 from app.models.employee import Employee
 from app.models.payslip import Payslip
 from app.models.upload_batch import UploadBatch
@@ -55,8 +56,11 @@ def payroll(app, db_session, tmp_path):
         db_session.add(batch)
         db_session.flush()
         for page_num, (name, *_) in enumerate(staff):
+            emp = employees[name]
             db_session.add(Payslip(
-                employee_id=employees[name].id, batch_id=batch.id, month_year=month, pdf_page_num=page_num,
+                employee_id=emp.id, batch_id=batch.id, month_year=month, pdf_page_num=page_num,
+                # As the importer does: where the employee was that month
+                department=emp.department, division=emp.division, gl=emp.gl,
             ))
     db_session.commit()
     return employees
@@ -348,3 +352,112 @@ def test_nominal_roll_without_gl_column_keeps_existing_gl(app, db_session, tmp_p
     parse_excel(str(path))
     emp = Employee.query.filter_by(ippis_number=777).one()
     assert (emp.name, emp.gl, emp.department) == ("NEW NAME", "12", "ROLLING MILLS")
+
+
+def test_past_months_keep_the_department_of_that_month(client, auth_headers, payroll, db_session):
+    """Adam transfers to POWER after August: August reports still list him under ROLLING MILLS."""
+    adam = payroll["Adam"]
+    adam.department = "POWER"
+    adam.gl = "06"
+    db_session.commit()
+
+    res = client.get(f"/api/export/department-payslips?month_year={MONTH}", headers=auth_headers)
+    counts = {d["label"]: d["payslips"] for d in res.get_json()["departments"]}
+    assert counts["ROLLING MILLS"] == 2
+    assert "POWER" not in counts
+
+    res = client.get(
+        "/api/export/bulk-payslips",
+        query_string={"month_year": MONTH, "department": "ROLLING MILLS", "gl": "05"},
+        headers=auth_headers,
+    )
+    assert _page_texts(res.data) == [f"Adam {MONTH}"]
+
+    res = client.get(f"/api/analytics/department-summary?month_year={MONTH}", headers=auth_headers)
+    summary = {d["department"]: d["headcount"] for d in res.get_json()["departments"]}
+    assert summary["ROLLING MILLS"] == 2
+
+
+def test_schema_upgrade_adds_and_backfills_payslip_placement(app, db_session):
+    """An existing database without the new columns gets them, filled from current records."""
+    from sqlalchemy import inspect, text
+    from app.schema import ensure_schema, reset_for_tests
+
+    emp = Employee(file_no=1, ippis_number=1, name="A", department="POWER", division="GRID")
+    db_session.add(emp)
+    batch = UploadBatch(month_year=MONTH, status="completed")
+    db_session.add(batch)
+    db_session.commit()
+    db_session.add(Payslip(employee_id=emp.id, batch_id=batch.id, month_year=MONTH, grade="GL08_CONPSS"))
+    db_session.commit()
+
+    # Recreate the old table shape: drop the new columns
+    with db.engine.begin() as conn:
+        for column in ("department", "division", "gl"):
+            conn.execute(text(f"DROP INDEX IF EXISTS ix_payslips_{column}"))
+            conn.execute(text(f"ALTER TABLE payslips DROP COLUMN {column}"))
+    assert "department" not in {c["name"] for c in inspect(db.engine).get_columns("payslips")}
+
+    reset_for_tests()
+    ensure_schema()
+    ensure_schema()  # safe to run again
+
+    row = db.session.execute(text("SELECT department, division, gl FROM payslips")).one()
+    assert tuple(row) == ("POWER", "GRID", "08")
+
+
+def test_history_cleanup_script(app, db_session, capsys):
+    from app.models.employee_history import EmployeeHistory as H
+    from scripts.clean_employee_history import main
+
+    wiped = Employee(file_no=1, ippis_number=11, name="WIPED", gl=None, department="POWER")
+    moved = Employee(file_no=2, ippis_number=12, name="MOVED", gl=None, department="GRID")
+    fmt = Employee(file_no=3, ippis_number=13, name="FORMAT", gl="8", department="POWER")
+    flip = Employee(file_no=4, ippis_number=14, name="FLIP", gl="09", department="MD/CE", division="SECURITY")
+    db_session.add_all([wiped, moved, fmt, flip])
+    batch = UploadBatch(month_year=MONTH, status="completed")
+    db_session.add(batch)
+    db_session.flush()
+    db_session.add_all([
+        # GL and division blanked by a roll without those columns: no real change
+        H(employee_id=wiped.id, old_gl="12", new_gl=None, old_department="POWER", new_department="POWER",
+          old_division="GRID", new_division=None),
+        # A real transfer recorded together with a blanked GL
+        H(employee_id=moved.id, old_gl="10", new_gl=None, old_department="POWER", new_department="GRID"),
+        # A real promotion, then a formatting-only "change"
+        H(employee_id=fmt.id, old_gl="07", new_gl="08", old_department="POWER", new_department="POWER"),
+        H(employee_id=fmt.id, old_gl="08", new_gl="8", old_department="POWER", new_department="POWER"),
+        # August layout flip and its reversal in September
+        H(employee_id=flip.id, old_gl="09", new_gl=None, old_department="MD/CE", new_department="SECURITY",
+          old_division="SECURITY", new_division=None),
+        H(employee_id=flip.id, old_gl=None, new_gl=None, old_department="SECURITY", new_department="MD/CE",
+          old_division=None, new_division="SECURITY"),
+        Payslip(employee_id=wiped.id, batch_id=batch.id, month_year=MONTH, grade="GL12_CONPSS"),
+    ])
+    db_session.commit()
+
+    # Report only: nothing changes
+    main([], app=app)
+    out = capsys.readouterr().out
+    assert "2 record no real change" in out
+    assert "1 pairs where a change is exactly undone" in out
+    assert H.query.count() == 6
+
+    main(["--apply"], app=app)
+    rows = lambda: [(h.employee_id, h.old_gl, h.new_gl, h.new_department) for h in H.query.order_by(H.id)]
+    # Round trips are kept unless asked; the transfer keeps its GL; the real promotion stays
+    assert rows() == [
+        (moved.id, "10", "10", "GRID"),
+        (fmt.id, "07", "08", "POWER"),
+        (flip.id, "09", "09", "SECURITY"),
+        (flip.id, "09", "09", "MD/CE"),
+    ]
+    # Running it again changes nothing more
+    main(["--apply"], app=app)
+    assert len(rows()) == 4
+    db_session.expire_all()
+    assert db.session.get(Employee, wiped.id).gl == "12"   # filled from the payslip
+    assert db.session.get(Employee, fmt.id).gl == "08"     # two-digit form
+
+    main(["--apply", "--remove-round-trips"], app=app)
+    assert [r[0] for r in rows()] == [moved.id, fmt.id]

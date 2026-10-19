@@ -83,7 +83,7 @@ def export_payslips_csv():
     if month_year:
         query = query.filter(Payslip.month_year == month_year)
 
-    query = apply_employee_filters(query, request.args)
+    query = apply_employee_filters(query, request.args, placement=Payslip)
     payslips = query.order_by(Employee.name).all()
 
     # Build CSV
@@ -103,9 +103,9 @@ def export_payslips_csv():
             emp.name if emp else "",
             emp.ippis_number if emp else "",
             emp.file_no if emp else "",
-            emp.department if emp else "",
-            emp.division if emp else "",
-            emp.gl if emp else "",
+            p.department or "",
+            p.division or "",
+            p.gl or "",
             p.grade or "",
             p.designation or "",
             p.month_year,
@@ -136,7 +136,7 @@ def export_bulk_payslips_pdf():
         return jsonify({"error": "month_year is required"}), 400
 
     query = _payslip_pages_query().filter(Payslip.month_year == month_year)
-    query = apply_employee_filters(query, request.args)
+    query = apply_employee_filters(query, request.args, placement=Payslip)
     pages = query.order_by(Employee.name).all()
 
     if not pages:
@@ -169,7 +169,8 @@ def department_payslips_summary():
     if not month_year:
         return jsonify({"error": "month_year is required"}), 400
 
-    department = func.nullif(Employee.department, "")
+    # The department the employee was in that month
+    department = func.nullif(Payslip.department, "")
     rows = (
         db.session.query(
             department,
@@ -205,7 +206,8 @@ def export_department_payslips_zip():
     if not month_year:
         return jsonify({"error": "month_year is required"}), 400
 
-    department = func.nullif(Employee.department, "")
+    # The department the employee was in that month
+    department = func.nullif(Payslip.department, "")
     rows = (
         db.session.query(department, Payslip.batch_id, Payslip.pdf_page_num)
         .join(Employee, Payslip.employee_id == Employee.id)

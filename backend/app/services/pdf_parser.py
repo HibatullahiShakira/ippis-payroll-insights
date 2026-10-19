@@ -185,8 +185,12 @@ def parse_pdf(filepath, batch_id, month_year):
 
         # PERFORMANCE OPTIMIZATION: Pre-load DB records into memory dictionaries. 
         # By loading ONLY the IDs and not the full SQLAlchemy objects, we save hundreds of MB of RAM!
-        employees_data = db.session.query(Employee.ippis_number, Employee.id).all()
-        employee_id_by_ippis = {ippis: emp_id for ippis, emp_id in employees_data}
+        employees_data = db.session.query(
+            Employee.ippis_number, Employee.id, Employee.department, Employee.division
+        ).all()
+        employee_id_by_ippis = {ippis: emp_id for ippis, emp_id, _, _ in employees_data}
+        # Department/division on record at import time, frozen onto this month's payslips
+        placement_by_id = {emp_id: (dept, div) for _, emp_id, dept, div in employees_data}
         
         payslips_data = db.session.query(Payslip.employee_id, Payslip.id).filter_by(month_year=month_year).all()
         payslip_id_by_emp_id = {emp_id: p_id for emp_id, p_id in payslips_data}
@@ -271,6 +275,8 @@ def parse_pdf(filepath, batch_id, month_year):
                     payslip.cumulative_pension = payslip_data.get("cumulative_pension")
                     payslip.cumulative_nhf = payslip_data.get("cumulative_nhf")
                     payslip.pdf_page_num = page_num
+                    payslip.department, payslip.division = placement_by_id.get(employee_id, (None, None))
+                    payslip.gl = extracted_gl
                     target_payslip = payslip
                 else:
                     # Create new payslip
@@ -298,6 +304,9 @@ def parse_pdf(filepath, batch_id, month_year):
                         cumulative_pension=payslip_data.get("cumulative_pension"),
                         cumulative_nhf=payslip_data.get("cumulative_nhf"),
                         pdf_page_num=page_num,
+                        department=placement_by_id.get(employee_id, (None, None))[0],
+                        division=placement_by_id.get(employee_id, (None, None))[1],
+                        gl=extracted_gl,
                     )
                     db.session.add(payslip)
                     db.session.flush()

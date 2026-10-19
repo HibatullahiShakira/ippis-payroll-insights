@@ -75,13 +75,18 @@ def _match_exact(column, value):
     return func.lower(column) == value.lower()
 
 
-def apply_employee_filters(query, args):
+def apply_employee_filters(query, args, placement=None):
     """
     Apply the Employee Directory filters (search, department, division, gl) to a
     query that already includes Employee, so lists and exports always agree.
+
+    placement: pass Payslip for payslip queries, so department/division/GL match
+    where the employee was in that month rather than where they are now.
     """
     from ..extensions import db
     from ..models.employee import Employee
+
+    placement = placement or Employee
 
     search = args.get("search", "").strip()
     if search:
@@ -95,16 +100,19 @@ def apply_employee_filters(query, args):
 
     department = args.get("department", "").strip()
     if department:
-        query = query.filter(_match_exact(Employee.department, department))
+        query = query.filter(_match_exact(placement.department, department))
 
     division = args.get("division", "").strip()
     if division:
-        query = query.filter(_match_exact(Employee.division, division))
+        query = query.filter(_match_exact(placement.division, division))
 
     gl = args.get("gl", "").strip()
     if gl:
         gl_list = [g.strip() for g in gl.split(",") if g.strip()]
         if gl_list:
-            query = query.filter(Employee.gl.in_(gl_list))
+            query = query.filter(placement.gl.in_(
+                # Match both as written and in the two-digit form ('8' and '08')
+                set(gl_list) | {normalize_gl(g) for g in gl_list if normalize_gl(g)}
+            ))
 
     return query

@@ -6,6 +6,7 @@ import io
 
 from ..models.payslip import Payslip
 from ..models.employee import Employee
+from ..utils import apply_employee_filters
 from ..services.pdf_export import PdfSources, merge_payslip_pages, safe_filename
 
 payslips_bp = Blueprint("payslips", __name__)
@@ -34,15 +35,8 @@ def list_payslips():
     if month_year:
         query = query.filter(Payslip.month_year == month_year)
 
-    department = request.args.get("department", "").strip()
-    if department:
-        query = query.filter(Employee.department.ilike(f"%{department}%"))
-
-    gl = request.args.get("gl", "").strip()
-    if gl:
-        gl_list = [g.strip() for g in gl.split(",") if g.strip()]
-        if gl_list:
-            query = query.filter(Employee.gl.in_(gl_list))
+    # Department / division / GL as they were in each payslip's month
+    query = apply_employee_filters(query, request.args, placement=Payslip)
 
     # Sorting
     query = query.order_by(Payslip.month_year.desc(), Employee.name.asc())
@@ -56,7 +50,7 @@ def list_payslips():
     for payslip in pagination.items:
         data = payslip.to_summary_dict()
         data["employee_name"] = payslip.employee.name
-        data["department"] = payslip.employee.department
+        data["department"] = payslip.department or payslip.employee.department
         data["ippis_number"] = payslip.employee.ippis_number
         results.append(data)
 

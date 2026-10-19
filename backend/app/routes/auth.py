@@ -11,9 +11,19 @@ from flask_jwt_extended import (
 
 from ..extensions import db
 from ..models.user import User
+from ..services import login_throttle
 from ..utils import current_user_from_jwt
 
 auth_bp = Blueprint("auth", __name__)
+
+
+def _client_address():
+    """
+    The caller's address. Behind Render's proxy every request arrives from 127.0.0.1,
+    so the proxy's X-Forwarded-For (first entry) identifies the real client.
+    """
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    return forwarded.split(",")[0].strip() or request.remote_addr
 
 
 @auth_bp.route("/register", methods=["POST"])
@@ -70,10 +80,21 @@ def login():
     if not data.get("username") or not data.get("password"):
         return jsonify({"error": "Username and password are required"}), 400
 
-    user = User.query.filter_by(username=data["username"]).first()
+    username = str(data["username"])
+    address = _client_address()
+    wait = login_throttle.seconds_until_allowed(username, address)
+    if wait:
+        minutes = max(1, round(wait / 60))
+        return jsonify({
+            "error": f"Too many failed login attempts. Please try again in about {minutes} minute(s)."
+        }), 429, {"Retry-After": str(wait)}
 
-    if not user or not user.check_password(data["password"]):
+    user = User.query.filter_by(username=username).first()
+
+    if not user or not user.check_password(str(data["password"])):
+        login_throttle.record_failure(username, address)
         return jsonify({"error": "Invalid username or password"}), 401
+    login_throttle.record_success(username)
 
     if not user.is_active:
         return jsonify({"error": "Account is deactivated"}), 403

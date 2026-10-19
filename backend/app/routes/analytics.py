@@ -31,7 +31,7 @@ def department_summary():
 
     results = (
         db.session.query(
-            Employee.department,
+            Payslip.department,
             func.count(Payslip.id).label("headcount"),
             func.sum(Payslip.total_gross_earnings).label("total_earnings"),
             func.sum(Payslip.total_gross_deductions).label("total_deductions"),
@@ -40,7 +40,7 @@ def department_summary():
         )
         .join(Employee, Payslip.employee_id == Employee.id)
         .filter(Payslip.month_year == month_year)
-        .group_by(Employee.department)
+        .group_by(Payslip.department)
         .order_by(func.sum(Payslip.total_gross_earnings).desc())
         .all()
     )
@@ -76,15 +76,15 @@ def gl_distribution():
 
     results = (
         db.session.query(
-            Employee.gl,
+            Payslip.gl,
             func.count(Payslip.id).label("headcount"),
             func.sum(Payslip.total_gross_earnings).label("total_earnings"),
             func.avg(Payslip.total_gross_earnings).label("avg_earnings"),
         )
         .join(Employee, Payslip.employee_id == Employee.id)
         .filter(Payslip.month_year == month_year)
-        .group_by(Employee.gl)
-        .order_by(Employee.gl)
+        .group_by(Payslip.gl)
+        .order_by(Payslip.gl)
         .all()
     )
 
