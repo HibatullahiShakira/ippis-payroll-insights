@@ -53,7 +53,9 @@ class Config:
 class TestConfig(Config):
     """Testing configuration."""
     TESTING = True
-    # In-memory database for fast, isolated tests
-    SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
+    # In-memory SQLite for fast, isolated tests. Set TEST_DATABASE_URL to a throwaway
+    # PostgreSQL database to run the same tests against the production database engine
+    # (SQLite does not enforce column lengths, which once hid a bug that broke uploads).
+    SQLALCHEMY_DATABASE_URI = _database_uri(os.environ.get("TEST_DATABASE_URL") or "sqlite:///:memory:")
     # Avoid hashing overhead during tests
     BCRYPT_LOG_ROUNDS = 4

@@ -379,7 +379,159 @@ def _update_payslip(payslip, data):
             setattr(payslip, field, data[field])
 
 
+# ── Label-based reading ──────────────────────────────────────────────────────
+# Each payslip field is found by its label, wherever it sits on the page, with
+# the wordings IPPIS has used (or plausibly will). If a label is renamed, add the
+# new wording here — no pattern needs rewriting.
+PAYSLIP_LABELS = {
+    "name": ["Employee Name", "Name of Employee", "Staff Name", "Name"],
+    "grade": ["Grade", "Grade Level", "Salary Grade"],
+    "ippis_number": ["IPPIS Number", "IPPIS No", "IPPIS No.", "IPPIS", "Staff ID"],
+    "step": ["Step", "Salary Step"],
+    "ministry": ["Ministry", "MDA", "Ministry/Agency"],
+    "gender": ["Gender", "Sex"],
+    "designation": ["Designation", "Rank", "Job Title"],
+    "tax_state": ["Tax State", "State of Tax"],
+    "location": ["Location"],
+    "tin": ["TIN", "Tax ID", "Tax Identification Number"],
+    "date_of_first_appt": ["Date of First Appt", "Date of First Appointment", "First Appointment"],
+    "date_of_birth": ["Date of Birth", "DOB", "Birth Date"],
+    "trade_union": ["Trade Union", "Union"],
+    "bank_name": ["Bank Name", "Bank"],
+    "pfa_name": ["PFA Name", "PFA", "Pension Fund Administrator"],
+    "account_number": ["Account Number", "Account No", "Acct No", "Account No."],
+    "pension_pin": ["Pension PIN", "RSA PIN", "PIN"],
+    "total_gross_earnings": ["Total Gross Earnings", "Gross Earnings", "Total Earnings"],
+    "total_gross_deductions": ["Total Gross Deductions", "Gross Deductions", "Total Deductions"],
+    "total_net_earnings": ["Total Net Earnings", "Net Earnings", "Net Pay", "Total Net Pay"],
+}
+
+# Headings that end a value (a value never runs into one of these)
+SECTION_HEADINGS = [
+    "Bank Information Details", "Contributory Pension Information", "Summary of Payments", "Balances",
+    "Gross Earnings Information", "Gross Deductions Information", "Earnings", "Deductions", "Amount",
+    "Confidential", "EMPLOYEE PAYSLIP", "FEDERAL GOVERNMENT OF NIGERIA",
+]
+
+
+def _label_key(text):
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+_LABEL_TO_FIELD = {}
+for _field, _labels in PAYSLIP_LABELS.items():
+    for _label in _labels:
+        _LABEL_TO_FIELD.setdefault(_label_key(_label), _field)
+_STOP_KEYS = set(_LABEL_TO_FIELD) | {_label_key(h) for h in SECTION_HEADINGS}
+# Longest labels first, so "Total Gross Earnings" wins over "Gross Earnings"
+_SAME_LINE_LABELS = sorted(_LABEL_TO_FIELD, key=len, reverse=True)
+
+
+def _split_label_line(line):
+    """
+    Return (field, inline value) if the line is a field label, else None.
+    Handles 'IPPIS Number:' alone on a line and 'IPPIS Number: 128045' on one line.
+    """
+    key = _label_key(line)
+    if key in _LABEL_TO_FIELD:
+        return _LABEL_TO_FIELD[key], ""
+    if ":" in line:
+        label, _, value = line.partition(":")
+        label_key = _label_key(label)
+        if label_key in _LABEL_TO_FIELD and value.strip():
+            return _LABEL_TO_FIELD[label_key], value.strip()
+    return None
+
+
+def _read_labelled_fields(text):
+    """
+    Read 'Label:' / value pairs from payslip text. A value is everything after its
+    label up to the next label or heading, so values that wrap ('United Bank For
+    Africa' / 'Plc') stay whole and an empty field ('Location:' then 'TIN:') stays empty.
+    """
+    lines = [l.strip() for l in text.split("\n")]
+    values = {}
+    i = 0
+    while i < len(lines):
+        found = _split_label_line(lines[i]) if lines[i] else None
+        if not found:
+            i += 1
+            continue
+        field, inline = found
+        parts = [inline] if inline else []
+        j = i + 1
+        while not inline and j < len(lines):
+            nxt = lines[j]
+            if nxt and (_label_key(nxt) in _STOP_KEYS or _split_label_line(nxt)):
+                break
+            if nxt:
+                parts.append(nxt)
+            j += 1
+            # Header fields hold at most a few short lines
+            if len(parts) >= 3:
+                break
+        value = re.sub(r"\s+", " ", " ".join(parts)).strip()
+        if value and field not in values:
+            values[field] = value
+        i = j if not inline else i + 1
+    return values
+
+
+def _typed_labelled_fields(text):
+    """Labelled values converted to the types the Payslip model stores; unusable values are dropped."""
+    raw = _read_labelled_fields(text)
+    out = {}
+
+    ippis = re.sub(r"\D", "", raw.get("ippis_number", ""))
+    if ippis:
+        out["ippis_number"] = int(ippis)
+    step = re.match(r"\d+", raw.get("step", ""))
+    if step:
+        out["step"] = int(step.group())
+    grade = re.match(r"[A-Za-z0-9_]+", raw.get("grade", ""))
+    if grade:
+        out["grade"] = grade.group()
+    gender = raw.get("gender", "").upper()
+    if gender in ("MALE", "FEMALE", "M", "F"):
+        out["gender"] = {"M": "MALE", "F": "FEMALE"}.get(gender, gender)
+    for field in ("designation", "tax_state", "trade_union", "bank_name", "pfa_name"):
+        if raw.get(field):
+            out[field] = raw[field]
+    for field in ("date_of_birth", "date_of_first_appt"):
+        date = re.search(r"\d{1,2}[-/][A-Za-z]{3}[-/]\d{4}", raw.get(field, ""))
+        if date:
+            out[field] = date.group()
+    for field in ("account_number", "pension_pin"):
+        digits = re.match(r"\d+$", raw.get(field, "").replace(" ", ""))
+        if digits:
+            out[field] = digits.group()
+    for field in ("total_gross_earnings", "total_gross_deductions", "total_net_earnings"):
+        amount = re.match(r"[\d,]+\.?\d*$", raw.get(field, ""))
+        if amount:
+            out[field] = _parse_amount(amount.group())
+    return out
+
+
 def _parse_page_text(text):
+    """
+    Parse a single payslip page's text into structured data.
+
+    Fields are read by their labels first (tolerant of moved or wrapped values and
+    renamed labels); the older fixed patterns below fill in anything still missing.
+    """
+    data = _parse_page_text_patterns(text)
+    if data is None:
+        labelled = _typed_labelled_fields(text)
+        if "ippis_number" not in labelled:
+            return None
+        data = _parse_page_text_patterns(text, require_ippis=False)
+    else:
+        labelled = _typed_labelled_fields(text)
+    data.update(labelled)
+    return data
+
+
+def _parse_page_text_patterns(text, require_ippis=True):
     """
     Parse a single payslip page's text into structured data.
 
@@ -408,11 +560,8 @@ def _parse_page_text(text):
     # --- Extract IPPIS Number ---
     ippis_match = re.search(r"IPPIS\s*Number[:\s]*(\d+)", full_text, re.IGNORECASE)
     if ippis_match:
-        try:
-            data["ippis_number"] = int(ippis_match.group(1))
-        except ValueError:
-            return None
-    else:
+        data["ippis_number"] = int(ippis_match.group(1))
+    elif require_ippis:
         return None
 
     # --- Extract Employee Name ---

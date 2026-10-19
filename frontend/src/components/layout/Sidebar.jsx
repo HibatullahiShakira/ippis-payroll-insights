@@ -5,7 +5,6 @@ import {
   FiUploadCloud, 
   FiPieChart, 
   FiLogOut,
-  FiBarChart2,
   FiX
 } from 'react-icons/fi';
 

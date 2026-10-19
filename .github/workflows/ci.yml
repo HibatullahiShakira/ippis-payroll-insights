@@ -12,21 +12,66 @@ jobs:
     defaults:
       run:
         working-directory: ./backend
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.14 is what Render runs; 3.12 is what the Dockerfile uses
+        python-version: [ "3.12", "3.14" ]
 
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v4
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
       with:
-        python-version: "3.10"
+        python-version: ${{ matrix.python-version }}
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install pytest pytest-cov
-    - name: Test with pytest
+    - name: Test with pytest (SQLite)
       run: |
         python -m pytest tests/ --cov=app
+
+  backend-test-postgres:
+    # Production runs on PostgreSQL, which enforces column sizes that SQLite ignores.
+    # A too-long GL value once made every payslip upload save 0 records on Render
+    # while all tests passed on SQLite — this job runs the same tests on PostgreSQL.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: payroll
+          POSTGRES_PASSWORD: payroll
+          POSTGRES_DB: payroll_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U payroll"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.14
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.14"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest
+    - name: Test with pytest (PostgreSQL)
+      env:
+        TEST_DATABASE_URL: postgresql://payroll:payroll@localhost:5432/payroll_test
+      run: |
+        python -m pytest tests/
 
   frontend-build:
     runs-on: ubuntu-latest
@@ -35,14 +80,16 @@ jobs:
         working-directory: ./frontend
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Use Node.js 20.x
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
         node-version: "20.x"
         cache: 'npm'
         cache-dependency-path: './frontend/package-lock.json'
     - name: Install dependencies
-      run: npm install
+      run: npm ci
+    - name: Lint
+      run: npm run lint
     - name: Build
       run: npm run build

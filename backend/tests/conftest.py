@@ -1,7 +1,35 @@
 import pytest
+from sqlalchemy import Numeric, String, event
+from sqlalchemy.orm import Session
+
 from app import create_app
 from app.extensions import db
 from app.models.user import User
+
+
+@event.listens_for(Session, "before_flush")
+def _enforce_column_limits(session, flush_context, instances):
+    """
+    Reject values PostgreSQL would reject, even when the tests run on SQLite
+    (which silently stores a 'GL14_CONPSS' in a 10-character column).
+    """
+    for obj in list(session.new) + list(session.dirty):
+        table = getattr(obj, "__table__", None)
+        if table is None:
+            continue
+        for column in table.columns:
+            value = getattr(obj, column.key, None)
+            if value is None:
+                continue
+            if isinstance(column.type, String) and column.type.length and len(str(value)) > column.type.length:
+                raise ValueError(
+                    f"value too long for {table.name}.{column.name} "
+                    f"({len(str(value))} > {column.type.length}): {value!r}"
+                )
+            if isinstance(column.type, Numeric) and column.type.precision:
+                limit = 10 ** (column.type.precision - (column.type.scale or 0))
+                if abs(value) >= limit:
+                    raise ValueError(f"numeric overflow for {table.name}.{column.name}: {value!r}")
 
 @pytest.fixture
 def app():
