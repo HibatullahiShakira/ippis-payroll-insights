@@ -4,6 +4,7 @@ import openpyxl
 from ..extensions import db
 from ..models.employee import Employee
 from ..models.employee_history import EmployeeHistory
+from ..utils import normalize_gl
 
 
 def parse_excel(filepath, batch_id=None):
@@ -86,16 +87,23 @@ def parse_excel(filepath, batch_id=None):
             except (ValueError, TypeError):
                 continue
 
-            gl_str = str(gl).strip() if gl is not None else None
+            gl_str = normalize_gl(gl)
             department_str = str(department).strip() if department is not None else None
             division_str = str(division).strip() if division is not None else None
 
             # Upsert
             employee = Employee.query.filter_by(ippis_number=ippis_number).first()
             if employee:
-                changed = False
+                # A sheet without a GL/department/division column says nothing about it:
+                # keep what is on record instead of wiping it (GL is refilled from payslips)
+                if "gl" not in col_map:
+                    gl_str = employee.gl
+                if "department" not in col_map:
+                    department_str = employee.department
+                if "division" not in col_map:
+                    division_str = employee.division
+
                 if employee.gl != gl_str or employee.department != department_str or employee.division != division_str:
-                    changed = True
                     history = EmployeeHistory(
                         employee_id=employee.id,
                         batch_id=batch_id,

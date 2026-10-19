@@ -27,6 +27,10 @@ from ..models.payslip import Payslip
 from ..models.payslip_earning import PayslipEarning
 from ..models.payslip_deduction import PayslipDeduction
 from ..models.upload_batch import UploadBatch
+from ..utils import normalize_gl
+
+
+AMOUNT_ONLY_RE = re.compile(r"^-?[\d,]+(?:\.\d+)?$")
 
 
 class PdfParseError(Exception):
@@ -122,9 +126,10 @@ def parse_pdf(filepath, batch_id, month_year):
                 ippis = payslip_data["ippis_number"]
                 employee_id = employee_id_by_ippis.get(ippis)
 
-                # Get the grade and use the full grade string
-                grade_str = payslip_data.get("grade")
-                extracted_gl = grade_str if grade_str else None
+                # Employee.gl holds just the level ('GL14_CONPSS' -> '14'); the full grade
+                # stays on the payslip. Storing the full string overflowed the 10-char
+                # column, which made PostgreSQL reject every page of the upload.
+                extracted_gl = normalize_gl(payslip_data.get("grade"))
 
                 if not employee_id:
                     # Create a minimal employee record if not found in Excel
@@ -463,7 +468,8 @@ def _parse_page_text(text):
 
     # --- Extract Deduction Items ---
     deductions_section = re.search(
-        r"Deductions\s+Amount\s*\n(.+?)Total\s*([\d,]+\.?\d*)",
+        # Very long deduction lists run off the page with no Total line; keep what is there
+        r"Deductions\s+Amount\s*\n(.+?)(?:Total\s*([\d,]+\.?\d*)|\Z)",
         full_text,
         re.IGNORECASE | re.DOTALL,
     )
@@ -477,27 +483,38 @@ def _parse_page_text(text):
 def _parse_line_items(text):
     """
     Parse earning/deduction line items from a text block.
-    Each line has a description followed by an amount.
+
+    Handles both layouts the PDF text can take:
+        "Pension 20,713.33"              (description and amount on one line)
+        "Pension" / "20,713.33"          (amount on the line after the description)
+    Descriptions that wrap over several lines are joined back together.
     """
     items = []
-    lines = text.strip().split("\n")
+    pending = []  # description lines waiting for their amount
 
-    for line in lines:
+    def add(description, amount_str):
+        amount = _parse_amount(amount_str)
+        # Skip "Total" lines
+        if description and amount is not None and not description.lower().startswith("total"):
+            items.append({"type": description, "amount": amount})
+
+    for line in text.strip().split("\n"):
         line = line.strip()
         if not line:
             continue
 
+        if AMOUNT_ONLY_RE.match(line):
+            if pending:
+                add(" ".join(pending), line)
+                pending = []
+            continue
+
         # Match: description followed by amount (with optional commas and decimal)
         match = re.match(r"(.+?)\s+([\d,]+\.?\d*)$", line)
-        if match:
-            item_type = match.group(1).strip()
-            amount = _parse_amount(match.group(2))
-
-            if item_type and amount is not None:
-                # Skip "Total" lines
-                if item_type.lower().startswith("total"):
-                    continue
-                items.append({"type": item_type, "amount": amount})
+        if match and not pending:
+            add(match.group(1).strip(), match.group(2))
+        else:
+            pending.append(line)
 
     return items
 

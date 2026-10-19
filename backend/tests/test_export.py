@@ -273,3 +273,76 @@ def test_pdf_with_no_readable_payslips_fails_with_reason(app, db_session, tmp_pa
 
     with pytest.raises(PdfParseError, match="1 page\(s\) had no IPPIS Number"):
         parse_pdf(str(path), batch.id, "2026-09")
+
+
+def test_normalize_gl():
+    from app.utils import normalize_gl
+
+    assert normalize_gl("GL14_CONPSS") == "14"
+    assert normalize_gl("GL08_CONPSS") == "08"
+    assert normalize_gl(8) == "08"
+    assert normalize_gl("8") == "08"
+    assert normalize_gl(" ") is None
+    assert len(normalize_gl("SOMETHING VERY LONG")) <= 10
+
+
+def test_line_items_on_separate_lines():
+    """IPPIS payslip text puts each amount on the line after its description."""
+    from decimal import Decimal
+    from app.services.pdf_parser import _parse_line_items
+
+    items = _parse_line_items("Pension\n20,713.33\nCtss Rent\nAja\n350\nNhf 6,472.92\nTotal\n27,536.25")
+    assert items == [
+        {"type": "Pension", "amount": Decimal("20713.33")},
+        {"type": "Ctss Rent Aja", "amount": Decimal("350")},
+        {"type": "Nhf", "amount": Decimal("6472.92")},
+    ]
+
+
+def test_payslip_upload_sets_short_gl_and_breakdown(app, db_session, tmp_path):
+    """Regression: the full grade 'GL14_CONPSS' (11 chars) overflowed Employee.gl (10) and
+    PostgreSQL rejected every page, so whole months uploaded as 0 records."""
+    from app.services.pdf_parser import parse_pdf
+
+    emp = Employee(file_no=1, ippis_number=128364, name="FAKAYEJO", gl=None)
+    db_session.add(emp)
+    batch = UploadBatch(month_year="2026-09", pdf_filename="sept.pdf", status="processing")
+    db_session.add(batch)
+    db_session.commit()
+
+    text = (
+        "EMPLOYEE PAYSLIP", "SEPTEMBER 2026", "Employee Name", "FAKAYEJO, Mrs. ANTHONIA", "Grade:", "GL14_CONPSS",
+        "IPPIS Number:", "128364", "Gross Earnings Information", "Earnings", "Amount", "Conpss Cons Salary",
+        "258,916.67", "Total", "258,916.67", "Gross Deductions Information", "Deductions", "Amount",
+        "Pension", "20,713.33", "Total", "20,713.33",
+    )
+    path = tmp_path / "sept.pdf"
+    path.write_bytes(_payslip_pdf_bytes(*text))
+
+    assert parse_pdf(str(path), batch.id, "2026-09") == 1
+    db_session.refresh(emp)
+    assert emp.gl == "14"
+    payslip = Payslip.query.filter_by(employee_id=emp.id).one()
+    assert payslip.grade == "GL14_CONPSS"
+    assert [e.earning_type for e in payslip.earnings] == ["Conpss Cons Salary"]
+    assert [d.deduction_type for d in payslip.deductions] == ["Pension"]
+
+
+def test_nominal_roll_without_gl_column_keeps_existing_gl(app, db_session, tmp_path):
+    """A nominal roll with no GL column used to wipe every employee's GL."""
+    import openpyxl
+    from app.services.excel_parser import parse_excel
+
+    db_session.add(Employee(file_no=5, ippis_number=777, name="OLD NAME", gl="12", department="POWER"))
+    db_session.commit()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["S/NO", "FILE NO", "IPPIS NUMBER", "NAME", "DEPARTMENT"])
+    ws.append([1, 5, 777, "NEW NAME", "ROLLING MILLS"])
+    path = tmp_path / "roll.xlsx"
+    wb.save(path)
+
+    parse_excel(str(path))
+    emp = Employee.query.filter_by(ippis_number=777).one()
+    assert (emp.name, emp.gl, emp.department) == ("NEW NAME", "12", "ROLLING MILLS")

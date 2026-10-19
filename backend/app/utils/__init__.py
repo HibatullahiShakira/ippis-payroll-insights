@@ -20,6 +20,24 @@ def format_currency(amount):
     return f"₦{float(amount):,.2f}"
 
 
+def normalize_gl(value):
+    """
+    Reduce a grade to the two-digit GL level stored on Employee.gl (max 10 chars).
+
+    'GL14_CONPSS' -> '14', 'GL08' -> '08', '8' -> '08', 8.0 -> '08'; None/blank -> None.
+    Anything without a recognisable level is kept, trimmed to fit the column.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    match = re.match(r"^(?:GL)?\s*0*(\d{1,2})(?:\.0+)?(?:_|\s|$)", text, re.IGNORECASE)
+    if match:
+        return f"{int(match.group(1)):02d}"
+    return text[:10]
+
+
 def is_valid_month_year(value):
     """Check that a value looks like '2026-04'."""
     return bool(value) and bool(MONTH_YEAR_RE.match(value))
