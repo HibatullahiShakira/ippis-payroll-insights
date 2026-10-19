@@ -10,7 +10,10 @@ export default function Upload() {
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState(null); // { type: 'success'|'error', message: '' }
   const [currentBatchId, setCurrentBatchId] = useState(null);
-  
+  // { batch, report } while an upload waits for the user to confirm or cancel it
+  const [review, setReview] = useState(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
+
   const excelInputRef = useRef(null);
   const pdfInputRef = useRef(null);
 
@@ -19,7 +22,7 @@ export default function Upload() {
     uploadAPI.list().then(res => {
       if (res.data && res.data.uploads && res.data.uploads.length > 0) {
         const latest = res.data.uploads[0];
-        if (latest.status === 'processing') {
+        if (['analyzing', 'awaiting_review', 'processing'].includes(latest.status)) {
           setCurrentBatchId(latest.id);
           setUploading(true);
         }
@@ -27,16 +30,26 @@ export default function Upload() {
     }).catch(console.error);
   }, []);
 
-  // Poll for status if a batch is processing
+  // Poll for status while a batch is being checked or imported
   useEffect(() => {
     if (!currentBatchId) return;
 
-    const interval = setInterval(async () => {
+    const poll = async () => {
       try {
         const res = await uploadAPI.status(currentBatchId);
         const batch = res.data.batch;
-        
-        if (batch.status === 'completed') {
+
+        if (batch.status === 'awaiting_review') {
+          setReview({ batch, report: res.data.report });
+          setStatus(null);
+          setCurrentBatchId(null);
+        } else if (batch.status === 'analyzing') {
+          setStatus({ type: 'info', message: `Checking the files for ${formatMonthYear(batch.month_year)} before anything is imported...` });
+        } else if (batch.status === 'cancelled') {
+          setStatus({ type: 'info', message: 'This upload was discarded. Nothing was imported.' });
+          setCurrentBatchId(null);
+          setUploading(false);
+        } else if (batch.status === 'completed') {
           setStatus({
             type: 'success',
             message: `Successfully processed ${batch.total_records} records for ${formatMonthYear(batch.month_year)}!`
@@ -49,20 +62,53 @@ export default function Upload() {
           setCurrentBatchId(null);
           setUploading(false);
         } else if (batch.status === 'processing') {
-          if (batch.total_records > 0) {
-             setStatus({ type: 'info', message: `Processing in background: ${batch.records_processed} of ${batch.total_records} pages parsed...` });
-          } else {
-             setStatus({ type: 'info', message: 'Analyzing document structure... (This may take a moment for large files)' });
-          }
+          setStatus({
+            type: 'info',
+            message: batch.total_records > 0
+              ? `Importing: ${batch.records_processed} of ${batch.total_records} payslips saved...`
+              : 'Importing the files...'
+          });
         }
-        // If processing, keep polling
+        // Otherwise keep polling
       } catch (err) {
         console.error("Failed to check status", err);
       }
-    }, 3000);
+    };
 
+    poll();
+    const interval = setInterval(poll, 3000);
     return () => clearInterval(interval);
   }, [currentBatchId]);
+
+  const handleConfirm = async () => {
+    setReviewBusy(true);
+    try {
+      const res = await uploadAPI.confirm(review.batch.id);
+      setReview(null);
+      setStatus({ type: 'info', message: 'Import started...' });
+      setCurrentBatchId(res.data.batch.id);
+    } catch (err) {
+      setStatus({ type: 'error', message: await getErrorMessage(err, 'The import could not be started.') });
+      setReview(null);
+      setUploading(false);
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
+  const handleCancelReview = async () => {
+    setReviewBusy(true);
+    try {
+      await uploadAPI.cancel(review.batch.id);
+      setStatus({ type: 'info', message: 'Upload discarded. Nothing was imported.' });
+    } catch (err) {
+      setStatus({ type: 'error', message: await getErrorMessage(err, 'The upload could not be discarded.') });
+    } finally {
+      setReview(null);
+      setUploading(false);
+      setReviewBusy(false);
+    }
+  };
 
   const handleFileChange = (e, type) => {
     const file = e.target.files[0];
@@ -93,7 +139,7 @@ export default function Upload() {
       });
       
       // Upload finished, now backend is processing
-      setStatus({ type: 'info', message: `Upload complete — detected ${formatMonthYear(res.data.batch.month_year)}. Processing files in background...` });
+      setStatus({ type: 'info', message: `Upload complete — detected ${formatMonthYear(res.data.batch.month_year)}. Checking the files before anything is imported...` });
       setCurrentBatchId(res.data.batch.id);
       
       // Clear files
@@ -140,8 +186,18 @@ export default function Upload() {
         </div>
       )}
 
+      {review && (
+        <ReviewPanel
+          review={review}
+          busy={reviewBusy}
+          onConfirm={handleConfirm}
+          onCancel={handleCancelReview}
+        />
+      )}
+
       <p style={{ marginBottom: '24px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
         The payroll month and year are read automatically from the payslip PDF.
+        Files are checked first; nothing is imported until you confirm.
       </p>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '24px' }}>
@@ -222,6 +278,116 @@ export default function Upload() {
           {uploading ? (currentBatchId ? 'Processing Data...' : 'Uploading Files...') : 'Upload and Process'}
         </button>
       </div>
+    </div>
+  );
+}
+
+const LEVEL_STYLES = {
+  error: { color: 'var(--accent-rose)', background: 'var(--accent-rose-dim)', label: 'Error' },
+  warning: { color: 'var(--accent-amber)', background: 'var(--accent-amber-dim)', label: 'Check' },
+  info: { color: 'var(--accent-blue)', background: 'var(--accent-blue-dim)', label: 'Info' },
+  ok: { color: 'var(--accent-emerald)', background: 'var(--accent-emerald-dim)', label: 'OK' },
+};
+
+const cellStyle = { padding: '6px 10px', fontSize: '0.8rem', textAlign: 'left' };
+
+function ReviewPanel({ review, busy, onConfirm, onCancel }) {
+  const { batch, report } = review;
+  if (!report) return null;
+  const pdf = report.pdf;
+  const excel = report.excel;
+
+  return (
+    <div style={{ border: '1px solid var(--border-secondary)', borderRadius: 'var(--radius-md)', padding: '20px', marginBottom: '24px' }}>
+      <h3 style={{ marginBottom: '4px' }}>Review before import — {report.month_label || formatMonthYear(batch.month_year)}</h3>
+      <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '16px' }}>
+        {[batch.pdf_filename, batch.excel_filename].filter(Boolean).join(' + ')}
+        {' · '}
+        {report.errors > 0
+          ? `${report.errors} error(s) must be fixed before this upload can be imported.`
+          : report.warnings > 0
+            ? `${report.warnings} item(s) to check. Nothing has been imported yet.`
+            : 'All checks passed. Nothing has been imported yet.'}
+      </p>
+
+      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginBottom: '16px' }}>
+        {pdf && <SummaryTile label="Payslips read" value={pdf.payslips?.toLocaleString()} detail={`from ${pdf.pages?.toLocaleString()} pages`} />}
+        {pdf?.previous_month && (
+          <SummaryTile
+            label={`vs ${formatMonthYear(pdf.previous_month)}`}
+            value={`${pdf.payslips - pdf.previous_count >= 0 ? '+' : ''}${pdf.payslips - pdf.previous_count}`}
+            detail={`${pdf.joined} new · ${pdf.left} left`}
+          />
+        )}
+        {pdf && <SummaryTile label="Fully itemised" value={pdf.payslips ? `${Math.round(pdf.fully_itemised * 100 / pdf.payslips)}%` : '—'} detail="breakdown matches totals" />}
+        {excel && <SummaryTile label="Nominal roll" value={excel.rows?.toLocaleString()} detail="employees read" />}
+      </div>
+
+      <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 16px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        {report.checks.map((check, i) => {
+          const style = LEVEL_STYLES[check.level] || LEVEL_STYLES.info;
+          return (
+            <li key={i} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', fontSize: '0.85rem' }}>
+              <span className="badge" style={{ color: style.color, background: style.background, minWidth: '52px', textAlign: 'center' }}>
+                {style.label}
+              </span>
+              <span>{check.message}</span>
+            </li>
+          );
+        })}
+      </ul>
+
+      {excel?.columns && Object.keys(excel.columns).length > 0 && (
+        <details style={{ marginBottom: '12px' }}>
+          <summary style={{ cursor: 'pointer', fontSize: '0.85rem' }}>Excel columns recognised</summary>
+          <table style={{ marginTop: '8px' }}>
+            <thead><tr><th style={cellStyle}>Field</th><th style={cellStyle}>Column in your sheet</th></tr></thead>
+            <tbody>
+              {Object.entries(excel.columns).map(([field, header]) => (
+                <tr key={field} style={{ cursor: 'default' }}><td style={cellStyle}>{field}</td><td style={cellStyle}>{header}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      )}
+
+      {pdf?.examples?.length > 0 && (
+        <details style={{ marginBottom: '12px' }}>
+          <summary style={{ cursor: 'pointer', fontSize: '0.85rem' }}>Pages to look at ({pdf.examples.length})</summary>
+          <table style={{ marginTop: '8px' }}>
+            <thead><tr><th style={cellStyle}>Page</th><th style={cellStyle}>IPPIS</th><th style={cellStyle}>Name</th><th style={cellStyle}>Issue</th></tr></thead>
+            <tbody>
+              {pdf.examples.map((ex, i) => (
+                <tr key={i} style={{ cursor: 'default' }}>
+                  <td style={cellStyle}>{ex.page}</td>
+                  <td style={cellStyle}>{ex.ippis ?? '—'}</td>
+                  <td style={cellStyle}>{ex.name ?? '—'}</td>
+                  <td style={cellStyle}>{ex.issue}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      )}
+
+      <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+        <button className="btn btn-secondary" onClick={onCancel} disabled={busy}>
+          Cancel upload
+        </button>
+        <button className="btn btn-primary" onClick={onConfirm} disabled={busy || !report.can_import}>
+          {busy ? 'Please wait...' : report.warnings > 0 ? 'Import anyway' : 'Confirm import'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SummaryTile({ label, value, detail }) {
+  return (
+    <div style={{ background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)', padding: '10px 14px', minWidth: '140px' }}>
+      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>{label}</div>
+      <div style={{ fontSize: '1.3rem', fontWeight: 700 }}>{value}</div>
+      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{detail}</div>
     </div>
   );
 }

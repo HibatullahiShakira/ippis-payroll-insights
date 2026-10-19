@@ -205,9 +205,9 @@ def _payslip_pdf_bytes(*lines):
 
 @pytest.fixture
 def upload_env(app, tmp_path, monkeypatch):
-    """Uploads go to a temp folder and the background parsing step is skipped."""
+    """Uploads go to a temp folder and the background checking step is skipped."""
     app.config["UPLOAD_FOLDER"] = str(tmp_path)
-    monkeypatch.setattr("app.routes.upload._process_upload", lambda *args: None)
+    monkeypatch.setattr("app.routes.upload._analyze_upload", lambda *args: None)
     return tmp_path
 
 
@@ -223,8 +223,10 @@ def test_upload_reads_month_from_pdf(client, auth_headers, upload_env):
     assert res.status_code == 202
     batch = res.get_json()["batch"]
     assert batch["month_year"] == "2026-08"
-    assert os.listdir(upload_env) == ["2026-08"]
-    assert os.listdir(upload_env / "2026-08") == [batch["pdf_filename"]]
+    assert batch["status"] == "analyzing"
+    # Held aside until confirmed: nothing lands in the month folder yet
+    assert os.listdir(upload_env) == ["pending"]
+    assert os.listdir(upload_env / "pending" / str(batch["id"])) == [batch["pdf_filename"]]
 
 
 def test_upload_pdf_month_overrides_client_value(client, auth_headers, upload_env):

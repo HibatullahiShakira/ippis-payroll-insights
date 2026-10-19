@@ -68,6 +68,8 @@ export const uploadAPI = {
     }),
   list: () => api.get('/uploads'),
   status: (id) => api.get(`/uploads/${id}/status`),
+  confirm: (id) => api.post(`/uploads/${id}/confirm`),
+  cancel: (id) => api.post(`/uploads/${id}/cancel`),
 };
 
 // ── Analytics ──

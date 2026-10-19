@@ -1,28 +1,44 @@
-"""Upload routes — handle Excel + PDF file upload and trigger parsing."""
+"""
+Upload routes — Excel + PDF uploads in two steps.
+
+1. POST /upload saves the files to a holding folder and analyses them in the
+   background without touching any data (status: analyzing -> awaiting_review).
+2. The user reviews the report and either confirms (POST /uploads/<id>/confirm,
+   status: processing -> completed) or cancels (POST /uploads/<id>/cancel).
+
+Files only move into the month's folder (and cloud storage) once confirmed, so a
+cancelled or mistaken upload never replaces the PDF an existing month relies on.
+"""
 
 import os
 import shutil
 import tempfile
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from werkzeug.utils import secure_filename
 
 from ..extensions import db
+from ..models.employee_history import EmployeeHistory
 from ..models.upload_batch import UploadBatch
+from ..models.upload_report import UploadReport
 from ..models.payslip import Payslip
 from ..models.payslip_earning import PayslipEarning
 from ..models.payslip_deduction import PayslipDeduction
 from ..services.excel_parser import parse_excel
 from ..services.pdf_parser import parse_pdf, detect_month_year
 from ..services.pdf_export import STORAGE_BUCKET, storage_object_path
+from ..services.upload_review import build_report, load_report, save_report
 from ..utils import admin_required, is_valid_month_year
 
 upload_bp = Blueprint("upload", __name__)
 
 ALLOWED_EXCEL = {".xlsx", ".xls"}
 ALLOWED_PDF = {".pdf"}
+
+# A batch stuck analysing/importing this long was cut off by a server restart
+STALE_AFTER = timedelta(minutes=30)
 
 
 def allowed_file(filename, allowed_extensions):
@@ -31,10 +47,45 @@ def allowed_file(filename, allowed_extensions):
     return ext.lower() in allowed_extensions
 
 
+def _pending_dir(batch_id, upload_folder=None):
+    """Holding folder for an upload's files until it is confirmed."""
+    return os.path.join(upload_folder or current_app.config["UPLOAD_FOLDER"], "pending", str(batch_id))
+
+
+def _pending_paths(batch, upload_folder=None):
+    folder = _pending_dir(batch.id, upload_folder)
+    excel = os.path.join(folder, batch.excel_filename) if batch.excel_filename else None
+    pdf = os.path.join(folder, batch.pdf_filename) if batch.pdf_filename else None
+    return excel, pdf
+
+
+def _start_background(target, *args):
+    app = current_app._get_current_object()
+    thread = threading.Thread(target=target, args=(app, *args))
+    thread.daemon = True
+    thread.start()
+
+
+def _expire_if_stale(batch):
+    """Mark a batch failed if the server restarted while it was being worked on."""
+    if batch.status not in ("analyzing", "processing") or not batch.uploaded_at:
+        return
+    started = batch.uploaded_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - started > STALE_AFTER:
+        stage = "checking" if batch.status == "analyzing" else "importing"
+        batch.status = "failed"
+        batch.error_message = (
+            f"The server restarted while {stage} this upload, so it did not finish. Please upload the files again."
+        )
+        db.session.commit()
+
+
 @upload_bp.route("/upload", methods=["POST"])
 @jwt_required()
 def upload_files():
-    """Upload Excel and/or PDF payslip files; the month is read from the payslip PDF."""
+    """Receive Excel and/or PDF payslip files and start checking them; nothing is imported yet."""
     user_id = get_jwt_identity()
     # Optional: the month is normally read from the payslip PDF itself
     month_year = request.form.get("month_year", "").strip()
@@ -57,7 +108,7 @@ def upload_files():
     if has_pdf and not allowed_file(pdf_file.filename, ALLOWED_PDF):
         return jsonify({"error": "PDF file must be .pdf"}), 400
 
-    # Files land in a staging folder first: the month folder is only known once the PDF is read
+    # Files land in a staging folder first: the month is only known once the PDF is read
     staging_dir = tempfile.mkdtemp(prefix="incoming_", dir=current_app.config["UPLOAD_FOLDER"])
     try:
         excel_filename = pdf_filename = None
@@ -82,46 +133,110 @@ def upload_files():
             # A nominal roll on its own carries no month; file it under the current one
             month_year = datetime.now(timezone.utc).strftime("%Y-%m")
 
-        # Create upload directory for this batch
-        upload_dir = os.path.join(current_app.config["UPLOAD_FOLDER"], month_year)
-        os.makedirs(upload_dir, exist_ok=True)
+        batch = UploadBatch(
+            month_year=month_year,
+            excel_filename=excel_filename,
+            pdf_filename=pdf_filename,
+            uploaded_by=int(user_id),
+            status="analyzing",
+        )
+        db.session.add(batch)
+        db.session.commit()
 
-        excel_path = pdf_path = None
-        if excel_filename:
-            excel_path = os.path.join(upload_dir, excel_filename)
-            os.replace(os.path.join(staging_dir, excel_filename), excel_path)
-        if pdf_filename:
-            pdf_path = os.path.join(upload_dir, pdf_filename)
-            os.replace(os.path.join(staging_dir, pdf_filename), pdf_path)
+        # Hold the files aside until the upload is reviewed and confirmed
+        pending = _pending_dir(batch.id)
+        shutil.rmtree(pending, ignore_errors=True)
+        os.makedirs(os.path.dirname(pending), exist_ok=True)
+        os.replace(staging_dir, pending)
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
 
-    # Create batch record
-    batch = UploadBatch(
-        month_year=month_year,
-        excel_filename=excel_filename,
-        pdf_filename=pdf_filename,
-        uploaded_by=int(user_id),
-        status="processing",
-    )
-
-
-    db.session.add(batch)
-    db.session.commit()
-
-    # Process files in background thread
-    app = current_app._get_current_object()
-    thread = threading.Thread(
-        target=_process_upload,
-        args=(app, batch.id, excel_path, pdf_path, month_year),
-    )
-    thread.daemon = True
-    thread.start()
+    _start_background(_analyze_upload, batch.id)
 
     return jsonify({
-        "message": "Upload started — processing in background",
+        "message": "Upload received — checking the files before import",
         "batch": batch.to_dict(),
     }), 202
+
+
+def _analyze_upload(app, batch_id):
+    """Background task: read the files without importing anything and store the review report."""
+    with app.app_context():
+        try:
+            batch = db.session.get(UploadBatch, batch_id)
+            excel, pdf = _pending_paths(batch, app.config["UPLOAD_FOLDER"])
+            report = build_report(batch.month_year, excel_path=excel, pdf_path=pdf)
+            save_report(batch_id, report)
+            batch.total_records = (
+                (report.get("pdf") or {}).get("payslips") or (report.get("excel") or {}).get("rows") or 0
+            )
+            batch.status = "awaiting_review"
+            db.session.commit()
+        except Exception as e:
+            app.logger.exception(f"Checking upload batch {batch_id} failed")
+            db.session.rollback()
+            batch = db.session.get(UploadBatch, batch_id)
+            if batch:
+                batch.status = "failed"
+                batch.error_message = f"The files could not be checked: {e}"
+                db.session.commit()
+        finally:
+            db.session.remove()
+
+
+@upload_bp.route("/uploads/<int:batch_id>/confirm", methods=["POST"])
+@jwt_required()
+def confirm_upload(batch_id):
+    """Import an upload that has been reviewed."""
+    batch = UploadBatch.query.get_or_404(batch_id)
+    if batch.status != "awaiting_review":
+        return jsonify({"error": f"This upload cannot be imported (status: {batch.status})."}), 409
+
+    report = load_report(batch_id) or {}
+    if not report.get("can_import"):
+        return jsonify({"error": "This upload has errors and cannot be imported. Fix the files and upload again."}), 409
+
+    pending_excel, pending_pdf = _pending_paths(batch)
+    if any(p and not os.path.exists(p) for p in (pending_excel, pending_pdf)):
+        batch.status = "failed"
+        batch.error_message = "The uploaded files are no longer on the server (it restarted). Please upload again."
+        db.session.commit()
+        return jsonify({"error": batch.error_message}), 410
+
+    # Only now do the files replace the ones the month's existing records rely on
+    month_dir = os.path.join(current_app.config["UPLOAD_FOLDER"], batch.month_year)
+    os.makedirs(month_dir, exist_ok=True)
+    excel_path = pdf_path = None
+    if pending_excel:
+        excel_path = os.path.join(month_dir, batch.excel_filename)
+        os.replace(pending_excel, excel_path)
+    if pending_pdf:
+        pdf_path = os.path.join(month_dir, batch.pdf_filename)
+        os.replace(pending_pdf, pdf_path)
+    shutil.rmtree(_pending_dir(batch_id), ignore_errors=True)
+
+    batch.status = "processing"
+    batch.records_processed = 0
+    # Restart the stale-upload clock for the import step
+    batch.uploaded_at = datetime.now(timezone.utc)
+    db.session.commit()
+
+    _start_background(_process_upload, batch.id, excel_path, pdf_path, batch.month_year)
+    return jsonify({"message": "Import started", "batch": batch.to_dict()}), 202
+
+
+@upload_bp.route("/uploads/<int:batch_id>/cancel", methods=["POST"])
+@jwt_required()
+def cancel_upload(batch_id):
+    """Discard an upload that has not been imported."""
+    batch = UploadBatch.query.get_or_404(batch_id)
+    if batch.status not in ("awaiting_review", "failed"):
+        return jsonify({"error": f"This upload cannot be cancelled (status: {batch.status})."}), 409
+    shutil.rmtree(_pending_dir(batch_id), ignore_errors=True)
+    if batch.status == "awaiting_review":
+        batch.status = "cancelled"
+    db.session.commit()
+    return jsonify({"message": "Upload discarded", "batch": batch.to_dict()})
 
 
 def _process_upload(app, batch_id, excel_path, pdf_path, month_year):
@@ -207,15 +322,18 @@ def _process_upload(app, batch_id, excel_path, pdf_path, month_year):
 def list_uploads():
     """List all upload batches."""
     batches = UploadBatch.query.order_by(UploadBatch.uploaded_at.desc()).all()
+    for batch in batches:
+        _expire_if_stale(batch)
     return jsonify({"uploads": [b.to_dict() for b in batches]})
 
 
 @upload_bp.route("/uploads/<int:batch_id>/status", methods=["GET"])
 @jwt_required()
 def upload_status(batch_id):
-    """Check the processing status of an upload batch."""
+    """Check the status of an upload batch, with its review report once the files are checked."""
     batch = UploadBatch.query.get_or_404(batch_id)
-    return jsonify({"batch": batch.to_dict()})
+    _expire_if_stale(batch)
+    return jsonify({"batch": batch.to_dict(), "report": load_report(batch_id)})
 
 
 @upload_bp.route("/uploads/month/<month_year>", methods=["DELETE"])
@@ -227,12 +345,19 @@ def delete_month_data(month_year):
     try:
         payslips = Payslip.query.filter_by(month_year=month_year).all()
         payslip_ids = [p.id for p in payslips]
-        
+
         if payslip_ids:
             PayslipEarning.query.filter(PayslipEarning.payslip_id.in_(payslip_ids)).delete(synchronize_session=False)
             PayslipDeduction.query.filter(PayslipDeduction.payslip_id.in_(payslip_ids)).delete(synchronize_session=False)
             Payslip.query.filter(Payslip.id.in_(payslip_ids)).delete(synchronize_session=False)
-            
+
+        batch_ids = [b.id for b in UploadBatch.query.filter_by(month_year=month_year)]
+        if batch_ids:
+            load_report(batch_ids[0])  # makes sure the reports table exists before deleting from it
+            UploadReport.query.filter(UploadReport.batch_id.in_(batch_ids)).delete(synchronize_session=False)
+            EmployeeHistory.query.filter(EmployeeHistory.batch_id.in_(batch_ids)).update(
+                {EmployeeHistory.batch_id: None}, synchronize_session=False
+            )
         UploadBatch.query.filter_by(month_year=month_year).delete(synchronize_session=False)
         db.session.commit()
         return jsonify({"message": f"Successfully deleted all data for {month_year}."})
