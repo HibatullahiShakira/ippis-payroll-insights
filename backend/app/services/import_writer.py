@@ -113,6 +113,9 @@ def save_employees(records, col_map, batch_id=None, progress=None):
             Employee.gl, Employee.department, Employee.division, Employee.serial_no,
         ))
     }
+    # Rows carrying a File Number in the IPPIS column update the right employee
+    from .excel_parser import remap_file_number_rows
+    records, _ = remap_file_number_rows(records, known.values())
     # The last row wins when an IPPIS number is listed twice
     by_ippis = {r["ippis_number"]: r for r in records}
 

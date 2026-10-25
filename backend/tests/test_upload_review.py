@@ -244,3 +244,33 @@ def test_reprocess_needs_the_stored_pdf(client, auth_headers, env):
     pending = upload(client, auth_headers, pdf=make_pdf(payslip_lines(1002, "BELLO, Mr. SANI")))
     res = client.post(f"/api/uploads/{pending['batch']['id']}/reprocess", headers=auth_headers)
     assert res.status_code == 409
+
+
+def test_file_number_in_ippis_column_updates_the_right_employee(client, auth_headers, env, db_session):
+    """
+    Regression: the August roll had File Numbers in the IPPIS column for new staff,
+    which created ~90 duplicate employees (wrong IPPIS, no File No, no GL).
+    """
+    db_session.add(Employee(ippis_number=641215, file_no=18155, name="ABAH CALEB ABAH", gl="09",
+                            department="WATER & GAS FACILITIES"))
+    db_session.commit()
+
+    excel = make_xlsx([
+        ["SN", "IPPIS NUMBER", "NAME", "DEPT"],
+        [1, 18155, "ABAH  CALEB ABAH ", "ENGINEERING WORKS"],   # File No in the IPPIS column
+        [2, 18299, "NEW PERSON NO PAYSLIP", "POWER"],          # short number, nobody to match
+    ])
+    status = upload(client, auth_headers, excel=excel)
+    warnings = " ".join(c["message"] for c in status["report"]["checks"] if c["level"] == "warning")
+    assert "1 row(s) have the File No in the IPPIS column" in warnings
+    assert "ABAH  CALEB ABAH (18155 -> IPPIS 641215)" in warnings
+    assert "1 new row(s) have a 5-digit-or-shorter IPPIS number" in warnings
+    assert status["report"]["excel"]["new_employees"] == 1
+
+    client.post(f"/api/uploads/{status['batch']['id']}/confirm", headers=auth_headers)
+    db.session.expire_all()
+    abah = Employee.query.filter(Employee.name.like("ABAH%")).all()
+    assert len(abah) == 1                                   # no duplicate
+    assert (abah[0].ippis_number, abah[0].file_no, abah[0].department, abah[0].gl) == (
+        641215, 18155, "ENGINEERING WORKS", "09")
+    assert Employee.query.count() == 2

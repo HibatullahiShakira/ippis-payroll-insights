@@ -19,7 +19,9 @@ from ..extensions import db
 from ..models.employee import Employee
 from ..models.payslip import Payslip
 from ..models.upload_report import UploadReport
-from .excel_parser import FIELD_LABELS, OPTIONAL_FIELDS, REQUIRED_FIELDS, read_nominal_roll
+from .excel_parser import (
+    FIELD_LABELS, OPTIONAL_FIELDS, REQUIRED_FIELDS, SHORT_IPPIS_LIMIT, read_nominal_roll, remap_file_number_rows,
+)
 from .pdf_parser import analyze_pdf
 
 # A month-on-month headcount change bigger than this is flagged
@@ -204,6 +206,29 @@ def _review_excel(excel_path, checks):
         rows = ", ".join(str(r) for r, _ in sheet["skipped_rows"][:8])
         checks.append(("warning", f"{len(sheet['skipped_rows'])} row(s) skipped for having no IPPIS number or "
                                   f"name (rows {rows}{'…' if len(sheet['skipped_rows']) > 8 else ''})."))
+
+    # File Numbers typed in the IPPIS column: matched to the right employee where possible
+    on_record = [
+        {"ippis_number": i, "file_no": f, "name": n}
+        for i, f, n in db.session.query(Employee.ippis_number, Employee.file_no, Employee.name)
+    ]
+    records, remapped = remap_file_number_rows(records, on_record)
+    summary["file_numbers_in_ippis_column"] = len(remapped)
+    if remapped:
+        examples = ", ".join(f"{name.strip()} ({value} -> IPPIS {real})" for value, real, name in remapped[:3])
+        checks.append(("warning", f"{len(remapped)} row(s) have the File No in the IPPIS column. Each matches an "
+                                  f"employee's File No and name, so that employee will be updated instead of a "
+                                  f"duplicate being created (e.g. {examples}). Please correct the sheet at source."))
+    on_record_ippis = {e["ippis_number"] for e in on_record}
+    unmatched_short = [r for r in records
+                       if r["ippis_number"] < SHORT_IPPIS_LIMIT and r["ippis_number"] not in on_record_ippis]
+    if unmatched_short:
+        names = ", ".join(f"{r['name'].strip()} ({r['ippis_number']})" for r in unmatched_short[:5])
+        checks.append(("warning", f"{len(unmatched_short)} new row(s) have a 5-digit-or-shorter IPPIS number, which "
+                                  f"usually means a File No was typed in the IPPIS column: {names}"
+                                  f"{'…' if len(unmatched_short) > 5 else ''}. They will be added as new employees; "
+                                  "a later payslip with their real IPPIS number would then create a second record."))
+    summary["short_ippis_rows"] = len(unmatched_short)
 
     ippis = [r["ippis_number"] for r in records]
     duplicates = len(ippis) - len(set(ippis))

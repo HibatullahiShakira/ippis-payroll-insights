@@ -75,6 +75,43 @@ def map_columns(header_row):
     return col_map, headers, unknown
 
 
+# IPPIS numbers in use are 6 digits; File Numbers are 5. A shorter "IPPIS" in a
+# nominal roll is usually a File Number typed in the wrong column.
+SHORT_IPPIS_LIMIT = 100000
+
+
+def name_key(name):
+    """'ABU, Mrs. JOAN ' -> 'ABUJOAN': for matching the same person across sources."""
+    text = re.sub(r"\b(MR|MRS|MS|MISS|DR|ENGR|ALH|CHIEF)\b\.?", " ", str(name or "").upper())
+    return re.sub(r"[^A-Z]", "", text)
+
+
+def remap_file_number_rows(records, employees):
+    """
+    Fix rows whose IPPIS column holds the employee's File Number.
+
+    A row whose "IPPIS" is not on record, but equals the File No of an employee
+    with the same name, is that employee: the row is re-keyed to their real IPPIS
+    number (and the value kept as their File No) instead of creating a duplicate.
+
+    employees: iterable of dicts with ippis_number, file_no and name.
+    Returns (records, remapped) where remapped lists (row value, real IPPIS, name).
+    """
+    employees = list(employees)
+    on_record = {e["ippis_number"] for e in employees}
+    by_file = {(e["file_no"], name_key(e["name"])): e for e in employees if e.get("file_no")}
+    out, remapped = [], []
+    for rec in records:
+        match = None
+        if rec["ippis_number"] not in on_record:
+            match = by_file.get((rec["ippis_number"], name_key(rec["name"])))
+        if match:
+            remapped.append((rec["ippis_number"], match["ippis_number"], rec["name"]))
+            rec = {**rec, "ippis_number": match["ippis_number"], "file_no": rec["ippis_number"]}
+        out.append(rec)
+    return out, remapped
+
+
 def _clean_digits(value):
     """'F/123' -> 123, 641215.0 -> 641215, '' -> None"""
     if value is None:
