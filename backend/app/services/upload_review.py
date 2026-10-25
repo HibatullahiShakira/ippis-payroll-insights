@@ -81,7 +81,7 @@ def _ippis_for_month(month_year):
     return {r[0] for r in rows}
 
 
-def _review_pdf(pdf_path, month_year, checks):
+def _review_pdf(pdf_path, month_year, checks, reprocess=False):
     found = analyze_pdf(pdf_path)
     ippis_found = found.pop("ippis")
     payslips = found["payslips"]
@@ -136,9 +136,15 @@ def _review_pdf(pdf_path, month_year, checks):
 
     # Compare with what is already on record
     existing = Payslip.query.filter_by(month_year=month_year).count()
-    if existing:
-        checks.append(("info", f"{month_label(month_year)} already has {existing:,} payslips on record; "
-                               "they will be replaced by this upload."))
+    summary["existing_payslips"] = existing
+    if existing and reprocess:
+        checks.append(("info", f"Re-processing: the {existing:,} {month_label(month_year)} payslips on record "
+                               "will be replaced by this re-read of the same stored PDF."))
+    elif existing:
+        # Each month is uploaded once; a second upload is how wrong data gets in
+        checks.append(("error", f"{month_label(month_year)} payslips are already in the system ({existing:,} "
+                                "payslips), so they cannot be uploaded again. "
+                                "To refresh these payslips with the latest reading rules, use Re-process in Upload History. To replace them with a different file, an admin must first delete this month in Upload History."))
 
     previous = (
         db.session.query(func.max(Payslip.month_year))
@@ -315,9 +321,9 @@ def _review_roll_month(excel_path, pdf_month, summary, checks):
     roll_month = month_from_filename(os.path.basename(excel_path))
     summary["roll_month"] = roll_month
     if roll_month is None:
-        checks.append(("warning", "The nominal roll's month could not be read from its file name, so it cannot be "
-                                  "checked against the rolls already imported. Include the month in the file name "
-                                  "(e.g. 'NOMINAL ROLL OCT 2026.xlsx')."))
+        checks.append(("error", "The nominal roll's month could not be read from its file name, so it cannot be "
+                                "checked against the rolls already imported. Rename the file to include the month "
+                                "and year (e.g. 'NOMINAL ROLL OCT 2026.xlsx') and upload it again."))
         return
 
     if pdf_month and roll_month != pdf_month:
@@ -326,32 +332,36 @@ def _review_roll_month(excel_path, pdf_month, summary, checks):
                                 "nominal roll with these payslips. If the file name is wrong, correct it and upload again."))
         return
 
-    latest, latest_at = None, None
+    latest, latest_at, imported_at = None, None, {}
     for name, uploaded_at in (db.session.query(UploadBatch.excel_filename, UploadBatch.uploaded_at)
                               .filter(UploadBatch.status == "completed", UploadBatch.excel_filename.isnot(None))):
         month = month_from_filename(name)
+        if month:
+            imported_at.setdefault(month, uploaded_at)
         if month and (latest is None or month > latest):
             latest, latest_at = month, uploaded_at
     summary["latest_roll_month"] = latest
-    if latest and roll_month < latest:
+    if roll_month in imported_at:
+        when = f" on {imported_at[roll_month]:%d %b %Y}" if imported_at[roll_month] else ""
+        checks.append(("error", f"The {month_label(roll_month)} nominal roll was already imported{when}, so it "
+                                "cannot be uploaded again. Each month's roll is imported once. To replace it, an "
+                                "admin must first delete the month in Upload History."))
+    elif latest and roll_month < latest:
         when = f" on {latest_at:%d %b %Y}" if latest_at else ""
         checks.append(("error", f"This is the {month_label(roll_month)} nominal roll, but the {month_label(latest)} "
                                 f"roll was already imported{when}. Importing an older roll would move staff back to "
                                 "their old departments. If this file is actually a newer roll, correct the month "
                                 "in its file name and upload again."))
-    elif latest and roll_month == latest:
-        checks.append(("info", f"The {month_label(roll_month)} nominal roll was imported before; importing it "
-                               "again only applies differences from what is on record now."))
 
 
-def build_report(month_year, excel_path=None, pdf_path=None):
+def build_report(month_year, excel_path=None, pdf_path=None, reprocess=False):
     """Read the files without importing anything and return the review report."""
     checks = []
     report = {"month_year": month_year, "month_label": month_label(month_year)}
 
     pdf_ippis = excel_ippis = None
     if pdf_path:
-        report["pdf"], pdf_ippis = _review_pdf(pdf_path, month_year, checks)
+        report["pdf"], pdf_ippis = _review_pdf(pdf_path, month_year, checks, reprocess=reprocess)
     if excel_path:
         report["excel"], excel_ippis = _review_excel(excel_path, checks)
         _review_roll_month(excel_path, month_year if pdf_path else None, report["excel"], checks)

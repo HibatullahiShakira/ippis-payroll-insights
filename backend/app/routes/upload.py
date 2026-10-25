@@ -159,13 +159,13 @@ def upload_files():
     }), 202
 
 
-def _analyze_upload(app, batch_id):
+def _analyze_upload(app, batch_id, reprocess=False):
     """Background task: read the files without importing anything and store the review report."""
     with app.app_context():
         try:
             batch = db.session.get(UploadBatch, batch_id)
             excel, pdf = _pending_paths(batch, app.config["UPLOAD_FOLDER"])
-            report = build_report(batch.month_year, excel_path=excel, pdf_path=pdf)
+            report = build_report(batch.month_year, excel_path=excel, pdf_path=pdf, reprocess=reprocess)
             save_report(batch_id, report)
             # Everything the import will save: nominal-roll rows, then payslips
             batch.total_records = (
@@ -267,7 +267,7 @@ def reprocess_upload(batch_id):
         os.makedirs(pending, exist_ok=True)
         shutil.copyfile(source_path, os.path.join(pending, batch.pdf_filename))
 
-    _start_background(_analyze_upload, batch.id)
+    _start_background(_analyze_upload, batch.id, True)
     return jsonify({
         "message": f"Re-reading the {source.month_year} payslip PDF — review the result before it is imported",
         "batch": batch.to_dict(),
@@ -401,16 +401,23 @@ def delete_month_data(month_year):
             PayslipDeduction.query.filter(PayslipDeduction.payslip_id.in_(payslip_ids)).delete(synchronize_session=False)
             Payslip.query.filter(Payslip.id.in_(payslip_ids)).delete(synchronize_session=False)
 
-        batch_ids = [b.id for b in UploadBatch.query.filter_by(month_year=month_year)]
+        # The month's uploads, plus nominal-roll-only uploads named for this month (older ones
+        # were filed under their upload month), so the month can be uploaded afresh
+        batch_ids = {b.id for b in UploadBatch.query.filter_by(month_year=month_year)}
+        batch_ids |= {
+            b.id for b in UploadBatch.query.filter(UploadBatch.pdf_filename.is_(None), UploadBatch.excel_filename.isnot(None))
+            if month_from_filename(b.excel_filename) == month_year
+        }
+        batch_ids = list(batch_ids)
         if batch_ids:
             load_report(batch_ids[0])  # makes sure the reports table exists before deleting from it
             UploadReport.query.filter(UploadReport.batch_id.in_(batch_ids)).delete(synchronize_session=False)
             EmployeeHistory.query.filter(EmployeeHistory.batch_id.in_(batch_ids)).update(
                 {EmployeeHistory.batch_id: None}, synchronize_session=False
             )
-        UploadBatch.query.filter_by(month_year=month_year).delete(synchronize_session=False)
+            UploadBatch.query.filter(UploadBatch.id.in_(batch_ids)).delete(synchronize_session=False)
         db.session.commit()
-        return jsonify({"message": f"Successfully deleted all data for {month_year}."})
+        return jsonify({"message": f"Deleted all data for {month_year}. It can now be uploaded again."})
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500

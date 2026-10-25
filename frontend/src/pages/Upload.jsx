@@ -40,6 +40,39 @@ export default function Upload() {
       .catch(err => console.error("Failed to load upload history", err));
   }, [currentBatchId, review]);
 
+  const currentUser = (() => {
+    try { return JSON.parse(localStorage.getItem('user')) || {}; } catch { return {}; }
+  })();
+
+  // Deliberately remove a month so it can be uploaded again (admins only)
+  const handleDeleteMonth = async (monthYear) => {
+    const label = formatMonthYear(monthYear);
+    const typed = window.prompt(
+      `This permanently deletes ALL ${label} payslips and that month's uploads, so the month can be uploaded again.
+
+`
+      + `Only do this if the ${label} data is wrong and you have the correct files ready.
+
+`
+      + `Type the month exactly as shown to confirm: ${label}`
+    );
+    if (typed === null) return;
+    if (typed.trim().toLowerCase() !== label.toLowerCase()) {
+      alert('The month did not match. Nothing was deleted.');
+      return;
+    }
+    setUploading(true);
+    try {
+      const res = await uploadAPI.deleteMonth(monthYear);
+      setStatus({ type: 'success', message: res.data.message });
+    } catch (err) {
+      setStatus({ type: 'error', message: await getErrorMessage(err, `${label} could not be deleted.`) });
+    } finally {
+      setUploading(false);
+      uploadAPI.list().then(res => setHistory(res.data.uploads || [])).catch(console.error);
+    }
+  };
+
   const handleReprocess = async (upload) => {
     const ok = window.confirm(
       `Re-read the stored payslip PDF for ${formatMonthYear(upload.month_year)} with the latest reading rules?\n\n`
@@ -307,7 +340,12 @@ export default function Upload() {
       </div>
     </div>
 
-    <UploadHistory uploads={history} busy={uploading} onReprocess={handleReprocess} />
+    <UploadHistory
+      uploads={history}
+      busy={uploading}
+      onReprocess={handleReprocess}
+      onDeleteMonth={currentUser.is_admin ? handleDeleteMonth : null}
+    />
     </>
   );
 }
@@ -318,7 +356,7 @@ const STATUS_BADGES = {
   cancelled: 'badge-blue',
 };
 
-function UploadHistory({ uploads, busy, onReprocess }) {
+function UploadHistory({ uploads, busy, onReprocess, onDeleteMonth }) {
   const [showAll, setShowAll] = useState(false);
   if (!uploads.length) return null;
   const shown = showAll ? uploads : uploads.slice(0, 10);
@@ -329,8 +367,9 @@ function UploadHistory({ uploads, busy, onReprocess }) {
         <h2>Upload History</h2>
       </div>
       <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '12px' }}>
-        Re-process reads a stored payslip PDF again with the latest reading rules (for example to fill in
-        earnings and deductions on older months). You review the result before anything changes.
+        Each month can be uploaded only once. Re-process reads a month's stored payslip PDF again with the
+        latest reading rules (for example to fill in earnings and deductions on older months); you review the
+        result before anything changes. To replace a month with different files, an admin deletes the month first.
       </p>
       <table>
         <thead>
@@ -363,6 +402,12 @@ function UploadHistory({ uploads, busy, onReprocess }) {
                 {u.status === 'completed' && u.pdf_filename && (
                   <button className="btn btn-sm btn-secondary" disabled={busy} onClick={() => onReprocess(u)}>
                     Re-process
+                  </button>
+                )}
+                {onDeleteMonth && u.status === 'completed' && u.pdf_filename && (
+                  <button className="btn btn-sm btn-danger" disabled={busy} onClick={() => onDeleteMonth(u.month_year)}
+                          style={{ marginLeft: '6px' }} title="Admins only: remove this month so it can be uploaded again">
+                    Delete month
                   </button>
                 )}
               </td>

@@ -71,6 +71,7 @@ export const uploadAPI = {
   confirm: (id) => api.post(`/uploads/${id}/confirm`),
   cancel: (id) => api.post(`/uploads/${id}/cancel`),
   reprocess: (id) => api.post(`/uploads/${id}/reprocess`),
+  deleteMonth: (monthYear) => api.delete(`/uploads/month/${monthYear}`),
 };
 
 // ── Analytics ──

@@ -59,7 +59,7 @@ def upload(client, headers, pdf=None, excel=None, pdf_name="sept.pdf", month_yea
     if pdf is not None:
         data["pdf_file"] = (io.BytesIO(pdf), pdf_name)
     if excel is not None:
-        data["excel_file"] = (io.BytesIO(excel), "roll.xlsx")
+        data["excel_file"] = (io.BytesIO(excel), "NOMINAL ROLL SEP 2026.xlsx")
     res = client.post("/api/upload", data=data, headers=headers, content_type="multipart/form-data")
     assert res.status_code == 202, res.get_json()
     batch_id = res.get_json()["batch"]["id"]
@@ -300,8 +300,17 @@ def test_older_nominal_roll_is_blocked_after_a_newer_one(client, auth_headers, e
     assert any(c["level"] == "error" and "This is the August 2026 nominal roll, but the September 2026 roll"
                in c["message"] for c in report["checks"])
 
-    # The same month again is allowed (e.g. to correct a mistake)
+    # Each month's roll is imported once: the same month again is blocked too
     _, status = _import_roll(client, auth_headers, "SEP2026 NOMINAL (2).xlsx", _staff(3, "MD/CE"))
+    assert status["report"]["can_import"] is False
+    assert any("September 2026 nominal roll was already imported" in c["message"] for c in status["report"]["checks"])
+
+    # ...and a roll whose month cannot be read is blocked, since it cannot be checked
+    _, status = _import_roll(client, auth_headers, "nominal roll.xlsx", _staff(3, "MD/CE"))
+    assert status["report"]["can_import"] is False
+
+    # A new month is fine
+    _, status = _import_roll(client, auth_headers, "NOMINAL ROLL OCT 2026.xlsx", _staff(3, "MD/CE"))
     assert status["report"]["can_import"] is True
 
 
@@ -319,17 +328,46 @@ def test_nominal_roll_must_match_its_payslips_month(client, auth_headers, env):
                for c in report["checks"])
 
 
-def test_roll_that_moves_staff_back_is_flagged_even_without_a_month(client, auth_headers, env):
-    batch_id, _ = _import_roll(client, auth_headers, "roll first.xlsx", _staff(12, "SECURITY"))
+def test_roll_that_moves_staff_back_is_flagged(client, auth_headers, env):
+    """Catches an old roll's contents even when it is given a new month's file name."""
+    batch_id, _ = _import_roll(client, auth_headers, "NOMINAL ROLL JAN 2026.xlsx", _staff(12, "SECURITY"))
     client.post(f"/api/uploads/{batch_id}/confirm", headers=auth_headers)
-    batch_id, status = _import_roll(client, auth_headers, "roll second.xlsx", _staff(12, "MD/CE"))
+    batch_id, status = _import_roll(client, auth_headers, "NOMINAL ROLL FEB 2026.xlsx", _staff(12, "MD/CE"))
     assert status["report"]["excel"]["placement_changes"] == 12
     assert status["report"]["excel"]["placement_reversals"] == 0      # a normal set of moves
     client.post(f"/api/uploads/{batch_id}/confirm", headers=auth_headers)
 
     # Uploading the first roll again would undo every move
-    _, status = _import_roll(client, auth_headers, "roll first again.xlsx", _staff(12, "SECURITY"))
+    _, status = _import_roll(client, auth_headers, "NOMINAL ROLL MAR 2026.xlsx", _staff(12, "SECURITY"))
     report = status["report"]
     assert report["excel"]["placement_reversals"] == 12
     assert any(c["level"] == "warning" and "would move staff BACK" in c["message"] for c in report["checks"])
     assert report["can_import"] is True   # a warning: correcting a mistake must stay possible
+
+
+def test_payslip_month_already_uploaded_is_blocked_but_reprocess_works(client, auth_headers, env):
+    pdf = make_pdf(payslip_lines(1001, "ADA, Mrs. OBI"))
+    first = upload(client, auth_headers, pdf=pdf)
+    client.post(f"/api/uploads/{first['batch']['id']}/confirm", headers=auth_headers)
+
+    again = upload(client, auth_headers, pdf=pdf, pdf_name="sept again.pdf")
+    assert again["report"]["can_import"] is False
+    assert any("September 2026 payslips are already in the system" in c["message"] for c in again["report"]["checks"])
+
+    # Re-process re-reads the stored file and is allowed
+    res = client.post(f"/api/uploads/{first['batch']['id']}/reprocess", headers=auth_headers)
+    status = client.get(f"/api/uploads/{res.get_json()['batch']['id']}/status", headers=auth_headers).get_json()
+    assert status["report"]["can_import"] is True
+
+
+def test_admin_delete_month_allows_a_fresh_upload(client, auth_headers, env):
+    pdf = make_pdf(payslip_lines(1001, "ADA, Mrs. OBI"))
+    excel = make_xlsx([["SN", "IPPIS NUMBER", "NAME", "DEPT"], [1, 1001, "ADA OBI", "POWER"]])
+    first = upload(client, auth_headers, pdf=pdf, excel=excel)
+    client.post(f"/api/uploads/{first['batch']['id']}/confirm", headers=auth_headers)
+    assert upload(client, auth_headers, pdf=pdf, excel=excel)["report"]["can_import"] is False
+
+    res = client.delete("/api/uploads/month/2026-09", headers=auth_headers)
+    assert res.status_code == 200
+    assert Payslip.query.count() == 0
+    assert upload(client, auth_headers, pdf=pdf, excel=excel)["report"]["can_import"] is True
