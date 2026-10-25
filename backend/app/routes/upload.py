@@ -26,7 +26,7 @@ from ..models.upload_report import UploadReport
 from ..models.payslip import Payslip
 from ..models.payslip_earning import PayslipEarning
 from ..models.payslip_deduction import PayslipDeduction
-from ..services.excel_parser import parse_excel
+from ..services.excel_parser import month_from_filename, parse_excel
 from ..services.pdf_parser import parse_pdf, detect_month_year
 from ..services.pdf_export import STORAGE_BUCKET, PdfSources, storage_object_path
 from ..services.upload_review import build_report, load_report, save_report
@@ -130,8 +130,8 @@ def upload_files():
                     "error": "Could not find the payroll month and year on the payslips in this PDF."
                 }), 400
         elif not month_year:
-            # A nominal roll on its own carries no month; file it under the current one
-            month_year = datetime.now(timezone.utc).strftime("%Y-%m")
+            # A nominal roll on its own: use the month in its file name, else the current month
+            month_year = month_from_filename(excel_filename) or datetime.now(timezone.utc).strftime("%Y-%m")
 
         batch = UploadBatch(
             month_year=month_year,

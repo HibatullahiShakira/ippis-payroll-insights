@@ -13,6 +13,8 @@ Check levels:
     ok      - a check that passed
 """
 
+import os
+
 from sqlalchemy import func
 
 from ..extensions import db
@@ -243,7 +245,103 @@ def _review_excel(excel_path, checks):
         checks.append(("info", f"{new} employee(s) are new and will be added."))
     if absent:
         checks.append(("info", f"{absent} employee(s) on record are not in this sheet; they are kept, not deleted."))
+
+    _review_placement_changes(records, sheet["col_map"], summary, checks)
     return summary, sheet_ippis
+
+
+PLACEMENT_FIELDS = ("department", "division", "gl")
+# This many "moves back" (and at least half of all moves) look like an older roll re-uploaded
+REVERSAL_WARN_COUNT = 10
+
+
+def _same(a, b):
+    a = str(a).strip().upper() if a is not None and str(a).strip() else None
+    b = str(b).strip().upper() if b is not None and str(b).strip() else None
+    return a == b
+
+
+def _review_placement_changes(records, col_map, summary, checks):
+    """
+    How many employees this roll would move, and how many of those moves would
+    simply undo the change the previous roll recorded for them: the signature of
+    an older roll being uploaded again.
+    """
+    from ..models.employee_history import EmployeeHistory
+
+    current = {
+        row.ippis_number: row for row in db.session.query(
+            Employee.id, Employee.ippis_number, Employee.department, Employee.division, Employee.gl)
+    }
+    latest_change = {}
+    for h in (db.session.query(EmployeeHistory)
+              .order_by(EmployeeHistory.employee_id, EmployeeHistory.change_date.desc(), EmployeeHistory.id.desc())):
+        latest_change.setdefault(h.employee_id, h)
+
+    fields = [f for f in PLACEMENT_FIELDS if f in col_map]
+    moves, reversals, examples = 0, 0, {}
+    for rec in {r["ippis_number"]: r for r in records}.values():
+        emp = current.get(rec["ippis_number"])
+        if emp is None:
+            continue
+        changed = [f for f in fields if not _same(rec[f], getattr(emp, f))]
+        if not changed:
+            continue
+        moves += 1
+        key = f"{emp.department or '-'} -> {rec['department'] if 'department' in col_map else emp.department}"
+        examples[key] = examples.get(key, 0) + 1
+        last = latest_change.get(emp.id)
+        if last and all(_same(rec[f], getattr(last, f"old_{f}")) and _same(getattr(emp, f), getattr(last, f"new_{f}"))
+                        for f in changed):
+            reversals += 1
+    summary.update(placement_changes=moves, placement_reversals=reversals)
+
+    if not moves:
+        checks.append(("ok", "No employee would change department, division or GL."))
+        return
+    top = ", ".join(f"{k} ({v})" for k, v in sorted(examples.items(), key=lambda kv: -kv[1])[:3])
+    checks.append(("info", f"{moves} employee(s) would change department, division or GL, e.g. {top}."))
+    if reversals >= REVERSAL_WARN_COUNT and reversals * 2 >= moves:
+        checks.append(("warning", f"{reversals} of these {moves} changes would move staff BACK to where they were "
+                                  "before the last nominal roll was imported. This usually means an older roll is "
+                                  "being uploaded again. Import only if these moves are really correct."))
+
+
+def _review_roll_month(excel_path, pdf_month, summary, checks):
+    """Block a roll for the wrong month: not matching its payslips, or older than the newest roll imported."""
+    from ..models.upload_batch import UploadBatch
+    from .excel_parser import month_from_filename
+
+    roll_month = month_from_filename(os.path.basename(excel_path))
+    summary["roll_month"] = roll_month
+    if roll_month is None:
+        checks.append(("warning", "The nominal roll's month could not be read from its file name, so it cannot be "
+                                  "checked against the rolls already imported. Include the month in the file name "
+                                  "(e.g. 'NOMINAL ROLL OCT 2026.xlsx')."))
+        return
+
+    if pdf_month and roll_month != pdf_month:
+        checks.append(("error", f"The nominal roll is for {month_label(roll_month)} (from its file name) but the "
+                                f"payslips are for {month_label(pdf_month)}. Upload the {month_label(pdf_month)} "
+                                "nominal roll with these payslips. If the file name is wrong, correct it and upload again."))
+        return
+
+    latest, latest_at = None, None
+    for name, uploaded_at in (db.session.query(UploadBatch.excel_filename, UploadBatch.uploaded_at)
+                              .filter(UploadBatch.status == "completed", UploadBatch.excel_filename.isnot(None))):
+        month = month_from_filename(name)
+        if month and (latest is None or month > latest):
+            latest, latest_at = month, uploaded_at
+    summary["latest_roll_month"] = latest
+    if latest and roll_month < latest:
+        when = f" on {latest_at:%d %b %Y}" if latest_at else ""
+        checks.append(("error", f"This is the {month_label(roll_month)} nominal roll, but the {month_label(latest)} "
+                                f"roll was already imported{when}. Importing an older roll would move staff back to "
+                                "their old departments. If this file is actually a newer roll, correct the month "
+                                "in its file name and upload again."))
+    elif latest and roll_month == latest:
+        checks.append(("info", f"The {month_label(roll_month)} nominal roll was imported before; importing it "
+                               "again only applies differences from what is on record now."))
 
 
 def build_report(month_year, excel_path=None, pdf_path=None):
@@ -256,6 +354,7 @@ def build_report(month_year, excel_path=None, pdf_path=None):
         report["pdf"], pdf_ippis = _review_pdf(pdf_path, month_year, checks)
     if excel_path:
         report["excel"], excel_ippis = _review_excel(excel_path, checks)
+        _review_roll_month(excel_path, month_year if pdf_path else None, report["excel"], checks)
 
     if pdf_ippis and excel_ippis:
         missing = len(pdf_ippis - excel_ippis)

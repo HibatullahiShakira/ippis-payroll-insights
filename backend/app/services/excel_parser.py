@@ -75,6 +75,33 @@ def map_columns(header_row):
     return col_map, headers, unknown
 
 
+_MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8,
+           "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+_MONTH_WORD = (r"(JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUNE?|JULY?|AUG(?:UST)?|"
+               r"SEP(?:T(?:EMBER)?)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)")
+
+
+def month_from_filename(filename):
+    """
+    The payroll month a file name refers to, as 'YYYY-MM', or None.
+
+    'NOMINAL ROLL AUG 2026(FIN).xlsx', 'NOMINAL_ROLL_AUG_2026FIN-1.xlsx' and
+    'SEP2026_NOMINAL_4PAYSLIP.xlsx' -> '2026-08' / '2026-08' / '2026-09';
+    '..._49_202609.pdf' -> '2026-09'.
+    """
+    name = str(filename or "").upper()
+    word_year = re.search(rf"(?<![A-Z]){_MONTH_WORD}[\s_\-.,]*((?:19|20)\d\d)", name)
+    if word_year:
+        return f"{word_year.group(2)}-{_MONTHS[word_year.group(1)[:3]]:02d}"
+    year_word = re.search(rf"(?<!\d)((?:19|20)\d\d)[\s_\-.,]*{_MONTH_WORD}(?![A-Z])", name)
+    if year_word:
+        return f"{year_word.group(1)}-{_MONTHS[year_word.group(2)[:3]]:02d}"
+    compact = re.search(r"(?<!\d)((?:19|20)\d\d)(0[1-9]|1[0-2])(?!\d)", name)
+    if compact:
+        return f"{compact.group(1)}-{compact.group(2)}"
+    return None
+
+
 # IPPIS numbers in use are 6 digits; File Numbers are 5. A shorter "IPPIS" in a
 # nominal roll is usually a File Number typed in the wrong column.
 SHORT_IPPIS_LIMIT = 100000

@@ -274,3 +274,62 @@ def test_file_number_in_ippis_column_updates_the_right_employee(client, auth_hea
     assert (abah[0].ippis_number, abah[0].file_no, abah[0].department, abah[0].gl) == (
         641215, 18155, "ENGINEERING WORKS", "09")
     assert Employee.query.count() == 2
+
+
+def _import_roll(client, headers, filename, rows):
+    excel = make_xlsx([["SN", "IPPIS NUMBER", "NAME", "DEPT"]] + rows)
+    res = client.post("/api/upload", data={"excel_file": (io.BytesIO(excel), filename)}, headers=headers,
+                      content_type="multipart/form-data")
+    batch_id = res.get_json()["batch"]["id"]
+    status = client.get(f"/api/uploads/{batch_id}/status", headers=headers).get_json()
+    return batch_id, status
+
+
+def _staff(n, dept):
+    return [[i, 700000 + i, f"STAFF {chr(65 + i)} PERSON", dept] for i in range(n)]
+
+
+def test_older_nominal_roll_is_blocked_after_a_newer_one(client, auth_headers, env):
+    batch_id, status = _import_roll(client, auth_headers, "SEP2026 NOMINAL.xlsx", _staff(3, "MD/CE"))
+    assert status["batch"]["month_year"] == "2026-09"   # month taken from the file name
+    client.post(f"/api/uploads/{batch_id}/confirm", headers=auth_headers)
+
+    _, status = _import_roll(client, auth_headers, "NOMINAL ROLL AUG 2026(FIN).xlsx", _staff(3, "SECURITY"))
+    report = status["report"]
+    assert report["can_import"] is False
+    assert any(c["level"] == "error" and "This is the August 2026 nominal roll, but the September 2026 roll"
+               in c["message"] for c in report["checks"])
+
+    # The same month again is allowed (e.g. to correct a mistake)
+    _, status = _import_roll(client, auth_headers, "SEP2026 NOMINAL (2).xlsx", _staff(3, "MD/CE"))
+    assert status["report"]["can_import"] is True
+
+
+def test_nominal_roll_must_match_its_payslips_month(client, auth_headers, env):
+    """Upload #42 paired the August roll with the October payslips."""
+    excel = make_xlsx([["SN", "IPPIS NUMBER", "NAME", "DEPT"], [1, 1001, "ADA OBI", "POWER"]])
+    pdf = make_pdf(payslip_lines(1001, "ADA, Mrs. OBI", month="OCTOBER 2026"))
+    res = client.post("/api/upload", headers=auth_headers, content_type="multipart/form-data", data={
+        "pdf_file": (io.BytesIO(pdf), "OCTOBER_2026.pdf"),
+        "excel_file": (io.BytesIO(excel), "NOMINAL_ROLL_AUG_2026FIN-1.xlsx"),
+    })
+    report = client.get(f"/api/uploads/{res.get_json()['batch']['id']}/status", headers=auth_headers).get_json()["report"]
+    assert report["can_import"] is False
+    assert any("is for August 2026 (from its file name) but the payslips are for October 2026" in c["message"]
+               for c in report["checks"])
+
+
+def test_roll_that_moves_staff_back_is_flagged_even_without_a_month(client, auth_headers, env):
+    batch_id, _ = _import_roll(client, auth_headers, "roll first.xlsx", _staff(12, "SECURITY"))
+    client.post(f"/api/uploads/{batch_id}/confirm", headers=auth_headers)
+    batch_id, status = _import_roll(client, auth_headers, "roll second.xlsx", _staff(12, "MD/CE"))
+    assert status["report"]["excel"]["placement_changes"] == 12
+    assert status["report"]["excel"]["placement_reversals"] == 0      # a normal set of moves
+    client.post(f"/api/uploads/{batch_id}/confirm", headers=auth_headers)
+
+    # Uploading the first roll again would undo every move
+    _, status = _import_roll(client, auth_headers, "roll first again.xlsx", _staff(12, "SECURITY"))
+    report = status["report"]
+    assert report["excel"]["placement_reversals"] == 12
+    assert any(c["level"] == "warning" and "would move staff BACK" in c["message"] for c in report["checks"])
+    assert report["can_import"] is True   # a warning: correcting a mistake must stay possible
